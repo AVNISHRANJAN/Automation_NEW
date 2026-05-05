@@ -79,8 +79,8 @@ class MetadataLogger:
         action: str,
         error_type: str,
         error_message: str,
-        element_label: str,
-        element_type: str,
+        element_label: str = "",    # optional — not all errors are element-level
+        element_type: str = "",     # optional — navigation errors have no element
         screenshot_path: str = "",
     ) -> None:
         """Record a failed action with error details."""

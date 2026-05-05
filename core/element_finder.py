@@ -31,6 +31,10 @@ class ElementType(Enum):
     LINK        = auto()
     FORM        = auto()
     OTHER       = auto()
+    # ===== NEW CODE START =====
+    FILE_UPLOAD = auto()   # input[type=file] — upload a sample file
+    TAB         = auto()   # [role=tab] UI tab panels
+    # ===== NEW CODE END =====
 
 
 @dataclass
@@ -58,10 +62,10 @@ DISCOVERY_SELECTORS = [
     ("input[type='tel']:not([disabled])",           ElementType.INPUT_TEL),
     ("input[type='number']:not([disabled])",        ElementType.INPUT_NUMBER),
     ("input[type='search']:not([disabled])",        ElementType.INPUT_SEARCH),
-    ("input[type='url']:not([disabled])",           ElementType.INPUT_TEXT),   # NEW: url input
-    ("input[type='date']:not([disabled])",          ElementType.INPUT_TEXT),   # NEW: date input
-    ("input[type='time']:not([disabled])",          ElementType.INPUT_TEXT),   # NEW: time input
-    ("input[type='range']:not([disabled])",         ElementType.INPUT_NUMBER), # NEW: range slider
+    ("input[type='url']:not([disabled])",           ElementType.INPUT_TEXT),   # url input
+    ("input[type='date']:not([disabled])",          ElementType.INPUT_TEXT),   # date input
+    ("input[type='time']:not([disabled])",          ElementType.INPUT_TEXT),   # time input
+    ("input[type='range']:not([disabled])",         ElementType.INPUT_NUMBER), # range slider
     ("input[type='password']:not([disabled])",      ElementType.INPUT_PASS),
     ("input:not([type]):not([disabled])",           ElementType.INPUT_TEXT),
     ("textarea:not([disabled])",                    ElementType.TEXTAREA),
@@ -69,6 +73,10 @@ DISCOVERY_SELECTORS = [
     ("input[type='checkbox']:not([disabled])",      ElementType.CHECKBOX),
     ("input[type='radio']:not([disabled])",         ElementType.RADIO),
     ("a[href]",                                     ElementType.LINK),
+    # ===== NEW CODE START =====
+    ("input[type='file']:not([disabled])",          ElementType.FILE_UPLOAD),  # file upload
+    ("[role='tab']:not([disabled])",                ElementType.TAB),          # UI tab panels
+    # ===== NEW CODE END =====
 ]
 # ===== NEW FEATURE END =====
 

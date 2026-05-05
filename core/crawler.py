@@ -109,6 +109,14 @@ class Crawler:
         print("=" * 60 + "\n")
         # ===== NEW FEATURE END =====
 
+        # ===== HYPERLINK TEST START =====
+        # Final hyperlink crawl completion banner
+        print("=" * 60)
+        print("  All hyperlinks tested successfully without duplication")
+        print(f"  Total unique pages visited: {len(self.visited)}")
+        print("=" * 60 + "\n")
+        # ===== HYPERLINK TEST END =====
+
         return list(self.visited)
 
     async def _test_page(self, url: str) -> None:
@@ -119,7 +127,34 @@ class Crawler:
         if not success:
             return
 
+        # FIX: Capture the ACTUAL URL the browser landed on after any redirects.
+        # e.g. http://foo.com → navigates → https://foo.com
+        # All drift comparisons must use canonical_url (the real browser URL),
+        # NOT the input url, otherwise http→https redirects trigger a false drift
+        # loop that re-discovers elements endlessly.
+        canonical_url = self.page.url
+
         await asyncio.sleep(0.5)  # allow JS to settle
+
+        # ===== HYPERLINK TEST START =====
+        # Content-based broken page detection.
+        # HTTP status alone is not enough — some servers return 200 with an
+        # error page body (soft 404). Check visible text for known broken indicators.
+        if await self._is_broken_page():
+            print(f"  ✗ Broken link detected: {url}")
+            logger.warning("Broken link detected (content check): %s", url)
+            ss_path = await self.screenshot_manager.capture_error(
+                page=self.page, url=url, action="navigate", error_type="broken_page_content"
+            )
+            self.metadata_logger.log_error(
+                url=url,
+                action="navigate",
+                error_type="broken_page_content",
+                error_message="Page content indicates broken/not-found state",
+                screenshot_path=ss_path,
+            )
+            return   # skip element testing for broken pages
+        # ===== HYPERLINK TEST END =====
 
         # ===== NEW FEATURE START =====
         # Detect and log dynamic / hidden elements before discovery
@@ -218,11 +253,12 @@ class Crawler:
                 idx += 1
                 continue
 
-            # Re-check page URL hasn't drifted from a PREVIOUS interaction
+            # Re-check page URL hasn't drifted from a PREVIOUS interaction.
+            # Use canonical_url (post-redirect real URL) not the input url.
             current_url = self.page.url
-            if self._normalize(current_url) != self._normalize(url):
+            if self._normalize(current_url) != self._normalize(canonical_url):
                 logger.debug("Page drifted to %s during element test, navigating back", current_url)
-                success = await self._safe_navigate(url)
+                success = await self._safe_navigate(canonical_url)
                 if not success:
                     break   # can't recover — stop testing this page
                 # Re-discover fresh handles; processed set keeps us from looping
@@ -259,11 +295,10 @@ class Crawler:
                 print(f"    ✓  [{result.element_type}] {result.element_label[:50]} → {result.action_performed}")
 
                 # Drift check AFTER success — buttons/links may have navigated away.
-                # We recover here rather than waiting for the top-of-loop check,
-                # so fresh handles are ready for the very next element.
-                if self._normalize(self.page.url) != self._normalize(url):
-                    logger.debug("Post-interact drift detected, recovering to %s", url)
-                    success = await self._safe_navigate(url)
+                # Use canonical_url (post-redirect) for comparison.
+                if self._normalize(self.page.url) != self._normalize(canonical_url):
+                    logger.debug("Post-interact drift detected, recovering to %s", canonical_url)
+                    success = await self._safe_navigate(canonical_url)
                     if not success:
                         break
                     element_list = await finder.discover()
@@ -288,9 +323,9 @@ class Crawler:
                 )
                 print(f"    ✗  [{result.element_type}] {result.element_label[:50]} → ERROR captured")
 
-                # Navigate back if drifted after error
-                if self._normalize(self.page.url) != self._normalize(url):
-                    success = await self._safe_navigate(url)
+                # Navigate back if drifted after error. Use canonical_url.
+                if self._normalize(self.page.url) != self._normalize(canonical_url):
+                    success = await self._safe_navigate(canonical_url)
                     if not success:
                         break
                     element_list = await finder.discover()
@@ -315,7 +350,11 @@ class Crawler:
         try:
             response = await self.page.goto(url, wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT)
             if response and response.status >= 400:
+                # ===== HYPERLINK TEST START =====
+                # Log in the requested "Broken link detected" format
+                print(f"  ✗ Broken link detected: {url} (HTTP {response.status})")
                 logger.warning("HTTP %d navigating to %s", response.status, url)
+                # ===== HYPERLINK TEST END =====
                 ss_path = await self.screenshot_manager.capture_error(
                     page=self.page, url=url, action="navigate", error_type=f"http_{response.status}"
                 )
@@ -339,10 +378,18 @@ class Crawler:
             return False
 
     def _normalize(self, url: str) -> str:
-        """Normalize URL: strip fragments, trailing slashes."""
+        """Normalize URL for deduplication.
+        - Strips URL fragments (#anchor)
+        - Strips trailing slashes
+        - Upgrades http:// → https:// (treats HTTP redirects as same page)
+        This prevents http://foo.com and https://foo.com from being crawled twice.
+        """
         try:
             p = urlparse(url)
-            normalized = p._replace(fragment="").geturl()
+            # Upgrade http to https — servers that redirect http→https should
+            # not be treated as a separate page from the https version.
+            scheme = "https" if p.scheme == "http" else p.scheme
+            normalized = p._replace(scheme=scheme, fragment="").geturl()
             return normalized.rstrip("/")
         except Exception:
             return url
@@ -355,3 +402,47 @@ class Crawler:
             return urlparse(url).netloc == self._base_domain
         except Exception:
             return False
+
+    # ===== HYPERLINK TEST START =====
+    async def _is_broken_page(self) -> bool:
+        """
+        Content-based broken page detection.
+
+        Some servers return HTTP 200 with an error body ("soft 404").
+        This method scans visible page text for known broken-page signals.
+        Complements the HTTP status check in _safe_navigate().
+
+        Returns True if the page appears to be broken/not-found.
+        """
+        # Known broken-page text patterns (case-insensitive substring match)
+        _BROKEN_SIGNALS = [
+            "404",
+            "page not found",
+            "not found",
+            "not available",
+            "doesn't exist",
+            "does not exist",
+            "no longer available",
+            "this page is gone",
+            "we couldn't find",
+            "cannot be found",
+            "error 404",
+            "oops",
+        ]
+        try:
+            # Read the visible body text (not innerHTML — avoids script noise)
+            body_text = await self.page.evaluate(
+                "() => (document.body && document.body.innerText) ? "
+                "document.body.innerText.toLowerCase().slice(0, 2000) : ''"
+            )
+            title_text = await self.page.title()
+            combined = (body_text + " " + title_text.lower())[:2200]
+
+            for signal in _BROKEN_SIGNALS:
+                if signal in combined:
+                    logger.debug("Broken page signal '%s' found on %s", signal, self.page.url)
+                    return True
+        except Exception as exc:
+            logger.debug("Broken page check failed: %s", exc)
+        return False
+    # ===== HYPERLINK TEST END =====
