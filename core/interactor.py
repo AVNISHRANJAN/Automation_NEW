@@ -204,13 +204,14 @@ class Interactor:
         elif t == ElementType.LINK:
             return await self._click_link(info)
 
-        # ===== NEW CODE START =====
+        # ===== MANUAL FILE UPLOAD START =====
         elif t == ElementType.FILE_UPLOAD:
-            return await self._handle_file_upload(info)
+            return await self._handle_manual_file_upload(info)
+        # ===== MANUAL FILE UPLOAD END =====
 
         elif t == ElementType.TAB:
             return await self._click_tab(info)
-        # ===== NEW CODE END =====
+
 
         else:
             return await self._click(info)
@@ -281,39 +282,96 @@ class Interactor:
         await info.handle.fill(dummy, timeout=config.ACTION_TIMEOUT)
         return f"fill:{dummy}"
 
-    # ===== NEW CODE START =====
-    async def _handle_file_upload(self, info: ElementInfo) -> str:
+    # ===== MANUAL FILE UPLOAD START =====
+    async def _handle_manual_file_upload(self, info: ElementInfo) -> str:
         """
-        Handle input[type=file] elements by uploading a real temporary file.
-        Creates a small text file on disk, sets it as the file input value,
-        then cleans up. Returns 'file_upload:success' or raises on failure.
+        Manual file upload handler.
+
+        Opens the OS file chooser dialog by clicking the file input, then
+        waits for the user to select a file (up to MANUAL_UPLOAD_TIMEOUT seconds).
+        Uses event-based polling: checks el.files.length > 0 every 0.5s.
+
+        Does NOT use set_input_files() or any automated file path injection.
+        """
+        MANUAL_UPLOAD_TIMEOUT = 60   # seconds to wait for user action
+        POLL_INTERVAL         = 0.5  # seconds between file-selected checks
+
+        is_multiple = await info.handle.get_attribute("multiple") is not None
+        upload_type = "multi-file" if is_multiple else "single-file"
+
+        print(f"\n  📂 Waiting for manual file upload ({upload_type}): '{info.label}'")
+        print(f"     Please select a file in the browser dialog window.")
+        logger.info("Waiting for manual file upload on '%s' (%s)", info.label, upload_type)
+
+        try:
+            await info.handle.scroll_into_view_if_needed()
+            # Click the file input to trigger the OS file chooser dialog.
+            # In headed (non-headless) mode this opens the native file dialog.
+            await info.handle.click(timeout=config.ACTION_TIMEOUT)
+        except Exception as exc:
+            logger.warning("Could not click file input '%s': %s", info.label, exc)
+            print(f"  ⚠  Could not open file dialog for '{info.label}'")
+            return "file_upload:click_failed"
+
+        # Poll until user selects file(s) or timeout expires
+        elapsed = 0.0
+        while elapsed < MANUAL_UPLOAD_TIMEOUT:
+            await asyncio.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
+            try:
+                # Check how many files the user has selected
+                files_count = await self.page.evaluate(
+                    "el => el.files ? el.files.length : 0",
+                    info.handle
+                )
+                if files_count > 0:
+                    # Read the selected filename(s) for logging
+                    filenames = await self.page.evaluate(
+                        "el => Array.from(el.files).map(f => f.name)",
+                        info.handle
+                    )
+                    names_str = ", ".join(filenames)
+                    print(f"  ✓  File selected successfully: {names_str}")
+                    logger.info("File selected by user on '%s': %s", info.label, names_str)
+                    return f"file_upload:manual_selected({names_str})"
+            except Exception as poll_exc:
+                # Handle stale element during polling (e.g. DOM update)
+                logger.debug("File poll error on '%s': %s", info.label, poll_exc)
+                break
+
+        # Timeout reached — do not block execution
+        print(f"  ⚠  Manual file upload skipped or timed out ({MANUAL_UPLOAD_TIMEOUT}s): '{info.label}'")
+        logger.warning("Manual file upload timed out on '%s'", info.label)
+        return "file_upload:skipped_timeout"
+
+    async def _handle_auto_file_upload(self, info: ElementInfo) -> str:
+        """
+        Automated file upload using a generated temp file.
+        Kept for reference — not called in normal flow (manual upload is used instead).
+        Uses set_input_files() which bypasses the OS file dialog entirely.
         """
         tmp_path = None
         try:
-            # Create a temp file with meaningful test content
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=".txt",
-                prefix="auto_test_upload_",
-                delete=False,
-                encoding="utf-8",
+                mode="w", suffix=".txt", prefix="auto_test_upload_",
+                delete=False, encoding="utf-8",
             ) as tmp:
                 tmp.write("Automated test upload file\nGenerated by Web Auto Tester\n")
                 tmp_path = tmp.name
-
             await info.handle.scroll_into_view_if_needed()
             await info.handle.set_input_files(tmp_path)
-            logger.info("File uploaded to '%s': %s", info.label, tmp_path)
-            return f"file_upload:success({Path(tmp_path).name})"
+            logger.info("Auto-upload to '%s': %s", info.label, tmp_path)
+            return f"file_upload:auto({Path(tmp_path).name})"
         except Exception as exc:
-            raise RuntimeError(f"File upload failed: {exc}") from exc
+            raise RuntimeError(f"Auto file upload failed: {exc}") from exc
         finally:
-            # Always clean up the temp file
             if tmp_path:
                 try:
                     Path(tmp_path).unlink(missing_ok=True)
                 except Exception:
                     pass
+    # ===== MANUAL FILE UPLOAD END =====
+
 
     async def _click_tab(self, info: ElementInfo) -> str:
         """
