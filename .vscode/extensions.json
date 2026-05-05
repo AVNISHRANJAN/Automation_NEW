@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "ms-python.python",
+    "ms-python.pylance",
+    "ms-python.debugpy",
+    "ms-playwright.playwright",
+    "littlefoxteam.vscode-python-test-adapter",
+    "usernamehw.errorlens",
+    "eamodio.gitlens",
+    "yzhang.markdown-all-in-one"
+  ]
+}

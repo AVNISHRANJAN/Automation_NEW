@@ -1,0 +1,39 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run: Web Auto Tester",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--url", "https://example.com"],
+      "console": "integratedTerminal",
+      "env": {
+        "HEADLESS": "false",
+        "SLOW_MO": "300"
+      }
+    },
+    {
+      "name": "Run: Headless (CI mode)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": ["--url", "https://example.com", "--headless", "--max-pages", "10"],
+      "console": "integratedTerminal",
+      "env": {
+        "HEADLESS": "true"
+      }
+    },
+    {
+      "name": "Debug: Pytest",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/", "-v", "--tb=short"],
+      "console": "integratedTerminal",
+      "env": {
+        "HEADLESS": "true"
+      }
+    }
+  ]
+}
