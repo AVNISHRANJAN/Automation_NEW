@@ -17,6 +17,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from reporting import console
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +52,11 @@ class LoginDetector:
         return False
 
     def _url_suggests_login(self, url: str) -> bool:
-        path = urlparse(url).path.lower()
-        query = urlparse(url).query.lower()
-        combined = path + query
+        # ===== OPTIMIZATION START =====
+        # Parse URL once; was calling urlparse(url) twice to get path and query separately.
+        parsed   = urlparse(url)
+        combined = parsed.path.lower() + parsed.query.lower()
+        # ===== OPTIMIZATION END =====
         return any(kw in combined for kw in config.LOGIN_URL_KEYWORDS)
 
     async def wait_for_manual_login(self, original_url: str) -> bool:
@@ -64,13 +67,7 @@ class LoginDetector:
 
         Returns True if login appears successful, False if timeout.
         """
-        print("\n" + "=" * 60)
-        print("  LOGIN REQUIRED")
-        print("=" * 60)
-        print(f"  URL: {self.page.url}")
-        print("  Please log in manually in the browser window.")
-        print("  The test will resume automatically once you are logged in.")
-        print("=" * 60 + "\n")
+        console.print_login_required(self.page.url)
 
         timeout_ms = config.POST_LOGIN_WAIT_TIMEOUT
 
@@ -85,7 +82,7 @@ class LoginDetector:
                 timeout=timeout_ms,
             )
             logger.info("Login detected: URL changed to %s", self.page.url)
-            print(f"\n[✓] Login successful. Resuming test on: {self.page.url}\n")
+            console.print_login_success(self.page.url)
             return True
 
         except Exception:
@@ -97,11 +94,11 @@ class LoginDetector:
                     timeout=5000,
                 )
                 logger.info("Login detected: password field removed from DOM")
-                print(f"\n[✓] Login successful. Resuming test on: {self.page.url}\n")
+                console.print_login_success(self.page.url)
                 return True
             except Exception:
                 pass
 
         logger.warning("Manual login timeout after %dms", timeout_ms)
-        print("\n[!] Login timeout. Proceeding without authentication.\n")
+        console.print_login_timeout()
         return False

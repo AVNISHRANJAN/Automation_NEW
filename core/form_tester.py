@@ -144,33 +144,33 @@ class FormTester:
           - Hidden form sections (display:none siblings of visible form sections)
         Returns True if multi-step form is detected.
         """
+        # ===== OPTIMIZATION START =====
+        # Was: two separate page.evaluate round-trips (has_next + has_progress).
+        # Now: single JS evaluate that checks both conditions in one call.
         try:
-            has_next = await self.page.evaluate("""
+            detected = await self.page.evaluate("""
                 () => {
                     const btns = Array.from(document.querySelectorAll('button, input[type=submit], a'));
-                    const nextKeywords = ['next', 'continue', 'proceed', 'step 2', '→', '>>', 'weiter'];
-                    return btns.some(el => {
+                    const nextKeywords = ['next', 'continue', 'proceed', 'step 2', '\u2192', '>>', 'weiter'];
+                    const hasNext = btns.some(el => {
                         const text = (el.textContent || el.value || '').toLowerCase().trim();
                         return nextKeywords.some(kw => text.includes(kw));
                     });
-                }
-            """)
-            has_progress = await self.page.evaluate("""
-                () => {
                     const progressSelectors = [
                         '[class*="step"]', '[class*="wizard"]', '[class*="progress"]',
                         '[aria-label*="step"]', '[data-step]',
                     ];
-                    return progressSelectors.some(s => document.querySelector(s) !== null);
+                    const hasProgress = progressSelectors.some(s => document.querySelector(s) !== null);
+                    return hasNext || hasProgress;
                 }
             """)
-            detected = bool(has_next or has_progress)
             if detected:
                 logger.info("Multi-step form detected on %s", self.page.url)
-            return detected
+            return bool(detected)
         except Exception as exc:
             logger.debug("Multi-step form detection failed: %s", exc)
             return False
+        # ===== OPTIMIZATION END =====
 
     async def advance_multistep_form(self) -> bool:
         """
@@ -400,6 +400,10 @@ class ElementManifestExporter:
         manifest_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_path = manifest_dir / f"{run_id}_manifest.json"
         self._data: Dict[str, list] = {}   # page_url → list of element dicts
+        # ===== OPTIMIZATION START =====
+        # Cache summary so get_summary() does not recompute sum() on every call.
+        self._summary: Dict = {"total_pages": 0, "total_elements": 0}
+        # ===== OPTIMIZATION END =====
 
     def record_page(self, page_url: str, elements: List[ElementInfo]) -> None:
         """
@@ -422,13 +426,17 @@ class ElementManifestExporter:
 
     def save(self) -> str:
         """Write the complete manifest to disk. Returns the file path."""
+        # ===== OPTIMIZATION START =====
+        # Compute summary once here and cache it — get_summary() returns the cache.
+        self._summary = {
+            "total_pages":    len(self._data),
+            "total_elements": sum(len(v) for v in self._data.values()),
+        }
+        # ===== OPTIMIZATION END =====
         payload = {
             "run_id":  self.run_id,
             "pages":   self._data,
-            "summary": {
-                "total_pages":    len(self._data),
-                "total_elements": sum(len(v) for v in self._data.values()),
-            }
+            "summary": self._summary,
         }
         try:
             self.manifest_path.write_text(
@@ -441,9 +449,9 @@ class ElementManifestExporter:
         return str(self.manifest_path)
 
     def get_summary(self) -> Dict:
-        return {
-            "total_pages":    len(self._data),
-            "total_elements": sum(len(v) for v in self._data.values()),
-        }
+        # ===== OPTIMIZATION START =====
+        # Return the cached summary computed in save() — avoids redundant sum().
+        # ===== OPTIMIZATION END =====
+        return self._summary
 
 # ===== NEW FEATURE END =====

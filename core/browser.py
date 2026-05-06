@@ -13,7 +13,13 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ===== OPTIMIZATION START =====
+# Guard added: matches the pattern in all other modules — avoids re-inserting
+# the project root on repeated imports (e.g. from test runners or reload).
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+# ===== OPTIMIZATION END =====
 import config
 
 logger = logging.getLogger(__name__)

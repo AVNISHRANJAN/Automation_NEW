@@ -43,6 +43,28 @@ _DESTRUCTIVE_KEYWORDS = [
 ]
 # ===== NEW FEATURE END =====
 
+# ===== OPTIMIZATION START =====
+# Stale-handle error keywords — defined once here (was duplicated inside interact()).
+# Tuple is faster than list for membership checks via 'any(kw in s for kw in ...)'.
+_STALE_ERROR_KEYWORDS: tuple = (
+    "not attached", "execution context", "target closed",
+    "frame was detached", "object was collected",
+)
+
+# Dummy value pools — lifted to module level so they are allocated ONCE,
+# not on every _get_dummy_value() call (which fires for every fillable element).
+_DUMMY_NAMES    = ("Alice Smith", "Bob Johnson", "Carol White", "David Lee", "Test User")
+_DUMMY_EMAILS   = ("alice@test.com", "bob@example.org", "qa_tester@mail.com", "tester@example.com")
+_DUMMY_PHONES   = ("9876543210", "8765432109", "7654321098", "6543210987")
+_DUMMY_CITIES   = ("Mumbai", "Delhi", "Bangalore", "Test City", "Chennai")
+_DUMMY_MESSAGES = (
+    "This is an automated test message.",
+    "QA automation test input — please ignore.",
+    "Testing form submission with sample data.",
+)
+_DUMMY_SEARCHES = ("test query", "sample search", "automation test", "demo")
+# ===== OPTIMIZATION END =====
+
 
 @dataclass
 class InteractionResult:
@@ -116,11 +138,11 @@ class Interactor:
                     page_url_after=url_before,
                 )
         except Exception as pre_exc:
+            # ===== OPTIMIZATION START =====
+            # Use shared _STALE_ERROR_KEYWORDS constant (no duplicate tuple literal)
             pre_msg = str(pre_exc).lower()
-            if any(kw in pre_msg for kw in (
-                "not attached", "execution context", "target closed",
-                "frame was detached", "object was collected",
-            )):
+            if any(kw in pre_msg for kw in _STALE_ERROR_KEYWORDS):
+            # ===== OPTIMIZATION END =====
                 logger.debug("Stale handle detected for [%s] %s — skipping", info.element_type.name, info.label)
                 return InteractionResult(
                     success=True,
@@ -149,11 +171,11 @@ class Interactor:
         except Exception as exc:
             error_msg = str(exc)
             # ===== FIX: Catch stale errors in dispatch too — return skip not fail =====
+            # ===== OPTIMIZATION START =====
+            # Reuse shared _STALE_ERROR_KEYWORDS constant (eliminates duplicate tuple)
             error_lower = error_msg.lower()
-            if any(kw in error_lower for kw in (
-                "not attached", "execution context", "target closed",
-                "frame was detached", "object was collected",
-            )):
+            if any(kw in error_lower for kw in _STALE_ERROR_KEYWORDS):
+            # ===== OPTIMIZATION END =====
                 logger.debug("Stale handle in dispatch [%s] %s — skipping", info.element_type.name, info.label)
                 return InteractionResult(
                     success=True,
@@ -429,39 +451,28 @@ class Interactor:
         """Pick the most appropriate dummy value based on element context.
         Uses randomised pools so each test run uses different values.
         """
-        # ===== NEW CODE START =====
-        # Random value pools — prevents detection as bot and gives richer test coverage
-        _NAMES    = ["Alice Smith", "Bob Johnson", "Carol White", "David Lee", "Test User"]
-        _EMAILS   = ["alice@test.com", "bob@example.org", "qa_tester@mail.com", "tester@example.com"]
-        _PHONES   = ["9876543210", "8765432109", "7654321098", "6543210987"]
-        _CITIES   = ["Mumbai", "Delhi", "Bangalore", "Test City", "Chennai"]
-        _MESSAGES = [
-            "This is an automated test message.",
-            "QA automation test input — please ignore.",
-            "Testing form submission with sample data.",
-        ]
-        _SEARCHES = ["test query", "sample search", "automation test", "demo"]
-        # ===== NEW CODE END =====
-
+        # ===== OPTIMIZATION START =====
+        # Pools are now module-level constants (allocated once, not per-call).
+        # ===== OPTIMIZATION END =====
         label_lower = info.label.lower()
         input_type  = info.input_type.lower()
 
         if input_type == "email" or "email" in label_lower:
-            return random.choice(_EMAILS)                      # ← randomised
+            return random.choice(_DUMMY_EMAILS)
         if input_type == "tel" or "phone" in label_lower or "mobile" in label_lower:
-            return random.choice(_PHONES)                      # ← randomised
+            return random.choice(_DUMMY_PHONES)
         if input_type == "number" or "zip" in label_lower or "postal" in label_lower:
             return config.DUMMY_DATA["zip"]
         if "name" in label_lower:
-            return random.choice(_NAMES)                       # ← randomised
+            return random.choice(_DUMMY_NAMES)
         if "address" in label_lower:
             return config.DUMMY_DATA["address"]
         if "city" in label_lower:
-            return random.choice(_CITIES)                      # ← randomised
+            return random.choice(_DUMMY_CITIES)
         if "search" in label_lower or input_type == "search":
-            return random.choice(_SEARCHES)                    # ← randomised
+            return random.choice(_DUMMY_SEARCHES)
         if "message" in label_lower or "comment" in label_lower or info.element_type == ElementType.TEXTAREA:
-            return random.choice(_MESSAGES)                    # ← randomised
+            return random.choice(_DUMMY_MESSAGES)
         if "user" in label_lower:
             return config.DUMMY_DATA["username"]
         if input_type == "url" or "website" in label_lower or "url" in label_lower:

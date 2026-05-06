@@ -20,9 +20,11 @@ Orchestration order (matches the flowchart exactly):
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import sys
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ── Project root on path ───────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,16 +47,38 @@ from core.crawler import Crawler
 from reporting.screenshot_manager import ScreenshotManager
 from reporting.metadata_logger import MetadataLogger
 from reporting.report_builder import ReportBuilder
+from reporting import console
+
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ]
-)
+# Terminal handler: WARNING+ only — prevents logger.info() calls from modules
+# flooding the user-facing terminal. Structured output goes through console.py.
+# File handler: INFO+ — full technical detail saved per run.
+def _setup_logging(run_id: str) -> None:
+    log_dir = config.OUTPUT_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{run_id}.log"
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    # File handler — full detail (INFO+), rotates to avoid huge files
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+
+    # Terminal handler — WARNING+ only (errors / critical only)
+    ch = logging.StreamHandler(sys.stderr)
+    ch.setLevel(logging.WARNING)
+    ch.setFormatter(logging.Formatter("  [%(levelname)s] %(name)s: %(message)s"))
+
+    root.addHandler(fh)
+    root.addHandler(ch)
+
+
 logger = logging.getLogger("main")
 
 
@@ -99,16 +123,13 @@ async def main() -> None:
     # Unique run ID for this execution
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-    print("\n" + "=" * 60)
-    print("  WEB AUTO TESTER")
-    print("=" * 60)
-    print(f"  Target:    {target_url}")
-    print(f"  Run ID:    {run_id}")
-    print(f"  Headless:  {config.HEADLESS}")
-    print(f"  Max pages: {config.MAX_PAGES}")
-    print("=" * 60 + "\n")
+    # Set up logging FIRST so all modules have handlers before they import
+    _setup_logging(run_id)
 
-    # ── Init reporting infrastructure ─────────────────────────────────────────
+    # ── Startup banner ─────────────────────────────────────────────────────────
+    console.print_banner(target_url, run_id, config.HEADLESS, config.MAX_PAGES)
+
+    # ── Init reporting infrastructure ──────────────────────────────────────────
     screenshot_manager = ScreenshotManager(run_id)
     metadata_logger    = MetadataLogger(run_id)
     report_builder     = ReportBuilder(run_id, target_url)
@@ -121,15 +142,14 @@ async def main() -> None:
         logger.info("Navigating to %s", target_url)
         success = await bm.navigate(page, target_url)
         if not success:
-            print(f"\n[✗] Failed to load {target_url}. Exiting.\n")
+            console.print_nav_failed(target_url)
             sys.exit(1)
 
         # ── Step 2: Login detection ────────────────────────────────────────────
         detector = LoginDetector(page)
         if await detector.is_login_page():
             if config.HEADLESS:
-                print("\n[!] Login page detected in headless mode.")
-                print("    Set --headless=false to allow manual login.\n")
+                console.print_login_timeout()
             else:
                 login_url = page.url
                 await detector.wait_for_manual_login(login_url)
@@ -153,23 +173,23 @@ async def main() -> None:
         # ── Step 5: Generate report ────────────────────────────────────────────
         all_records  = metadata_logger.get_all_records()
         errors       = metadata_logger.get_errors()
+        successes    = metadata_logger.get_successes()
         report_path  = report_builder.build(all_records, visited_pages)
 
-        # ── Final summary ──────────────────────────────────────────────────────
-        print("\n" + "=" * 60)
-        print("  TEST COMPLETE")
-        print("=" * 60)
-        print(f"  Pages tested:     {len(visited_pages)}")
-        print(f"  Actions logged:   {len(all_records)}")
-        print(f"  Errors captured:  {len(errors)}")
-        print(f"  Report:           {report_path}")
-        print(f"  Screenshots:      {config.SCREENSHOT_DIR / run_id}")
-        print("=" * 60 + "\n")
+        # Count screenshots captured
+        ss_dir = config.SCREENSHOT_DIR / run_id
+        screenshot_count = len(list(ss_dir.rglob("*.png"))) if ss_dir.exists() else 0
 
-        if errors:
-            print(f"  [!] {len(errors)} errors found. Check the report for details.\n")
-        else:
-            print("  [✓] No errors detected.\n")
+        # ── Final summary ──────────────────────────────────────────────────────
+        console.print_final_summary(
+            pages=len(visited_pages),
+            total_elements=len(all_records),
+            passed=len(successes),
+            failed=len(errors),
+            screenshots=screenshot_count,
+            report_path=report_path,
+            screenshot_dir=str(ss_dir),
+        )
 
 
 if __name__ == "__main__":
