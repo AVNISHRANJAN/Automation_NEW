@@ -233,6 +233,7 @@ def print_final_summary(
     screenshots: int,
     report_path: str,
     screenshot_dir: str,
+    excel_path: str = "",
 ) -> None:
     """Print the final execution summary banner."""
     status_line = (
@@ -250,12 +251,15 @@ def print_final_summary(
     print(f"  {_c(_GREEN, 'Passed Actions  ')} : {_bold(str(passed))}")
     print(f"  {_c(_RED  if failed else _DIM, 'Failed Actions  ')} : {_bold(str(failed))}")
     print(f"  {_c(_BLUE, 'Screenshots     ')} : {_bold(str(screenshots))}")
-    print(f"  {_c(_BLUE, 'Report          ')} : {report_path}")
+    print(f"  {_c(_BLUE, 'HTML Report     ')} : {report_path}")
+    if excel_path:
+        print(f"  {_c(_GREEN, 'Excel Report    ')} : {excel_path}")
     print(f"  {_c(_BLUE, 'Screenshots Dir ')} : {screenshot_dir}")
     print(_sep())
     print(status_line)
     print(_sep())
     print()
+
 
 
 def print_login_required(url: str) -> None:

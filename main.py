@@ -47,6 +47,7 @@ from core.crawler import Crawler
 from reporting.screenshot_manager import ScreenshotManager
 from reporting.metadata_logger import MetadataLogger
 from reporting.report_builder import ReportBuilder
+from reporting.excel_reporter import ExcelReporter
 from reporting import console
 
 
@@ -133,6 +134,7 @@ async def main() -> None:
     screenshot_manager = ScreenshotManager(run_id)
     metadata_logger    = MetadataLogger(run_id)
     report_builder     = ReportBuilder(run_id, target_url)
+    excel_reporter     = ExcelReporter(run_id, target_url)
 
     # ── Launch browser ─────────────────────────────────────────────────────────
     async with BrowserManager() as bm:
@@ -175,6 +177,7 @@ async def main() -> None:
         errors       = metadata_logger.get_errors()
         successes    = metadata_logger.get_successes()
         report_path  = report_builder.build(all_records, visited_pages)
+        excel_path   = excel_reporter.build(all_records, visited_pages)
 
         # Count screenshots captured
         ss_dir = config.SCREENSHOT_DIR / run_id
@@ -189,6 +192,7 @@ async def main() -> None:
             screenshots=screenshot_count,
             report_path=report_path,
             screenshot_dir=str(ss_dir),
+            excel_path=excel_path,
         )
 
 
