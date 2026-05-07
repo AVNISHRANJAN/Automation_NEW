@@ -43,6 +43,15 @@ _DESTRUCTIVE_KEYWORDS = [
 ]
 # ===== NEW FEATURE END =====
 
+# Mobile/overlay navigation toggle buttons that are visually hidden on desktop
+# but still discovered by Playwright.  Clicking them causes a 10-second timeout
+# because the navbar intercepts pointer events.  Skip them immediately instead.
+_OVERLAY_NAV_KEYWORDS = (
+    "close menu", "open menu", "close nav", "open nav",
+    "toggle menu", "toggle navigation", "toggle nav", "toggle sidebar",
+    "hamburger", "menu toggle", "nav toggle",
+)
+
 # ===== OPTIMIZATION START =====
 # Stale-handle error keywords — defined once here (was duplicated inside interact()).
 # Tuple is faster than list for membership checks via 'any(kw in s for kw in ...)'.
@@ -247,8 +256,16 @@ class Interactor:
             return await self._click(info)
 
     async def _click(self, info: ElementInfo) -> str:
-        # Skip buttons whose label looks destructive (logout, delete, etc.)
         label_lower = info.label.lower()
+
+        # Skip mobile nav toggle buttons (hamburger/close-menu) that are hidden
+        # on desktop — clicking them causes a 10-second timeout because the
+        # navbar intercepts pointer events on the real element underneath.
+        if any(kw in label_lower for kw in _OVERLAY_NAV_KEYWORDS):
+            logger.debug("Skipping overlay/mobile nav button: '%s'", info.label)
+            return f"skipped_mobile_nav:{info.label}"
+
+        # Skip buttons whose label looks destructive (logout, delete, etc.)
         if any(kw in label_lower for kw in _DESTRUCTIVE_KEYWORDS):
             logger.warning("Skipping destructive button: '%s'", info.label)
             return f"skipped_destructive:{info.label}"

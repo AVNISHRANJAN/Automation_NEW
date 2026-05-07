@@ -528,6 +528,14 @@ class FormTester:
     async def testActionButtons(self) -> List[FormTestResult]:
         """
         Test Apply/Search/Submit/Clear style action buttons after dropdown selection.
+
+        Deduplication rules:
+          - Buttons are deduplicated by normalised label — only the FIRST occurrence
+            of each unique (kind, normalised_text) pair is tested.  Duplicate labels
+            (e.g. 12 identical "APPLY" buttons on a careers listing page) are silently
+            skipped so they don't generate a flood of false failures.
+          - If ALL candidates are disabled we bail out early with a single skip result
+            rather than reporting N individual failures.
         """
         results: List[FormTestResult] = []
         try:
@@ -547,18 +555,38 @@ class FormTester:
                         .filter(Boolean);
                 }
             """)
-            for b in buttons or []:
+
+            if not buttons:
+                return results
+
+            # Deduplicate: keep only the first occurrence of each unique (kind, label)
+            seen_dedup: set = set()
+            unique_buttons = []
+            for b in buttons:
+                dedup_key = (b.get("kind", ""), (b.get("text") or "").strip().lower()[:60])
+                if dedup_key not in seen_dedup:
+                    seen_dedup.add(dedup_key)
+                    unique_buttons.append(b)
+
+            # If every unique button is disabled, report once and bail out
+            active_buttons = [b for b in unique_buttons if not b.get("disabled")]
+            if not active_buttons:
+                logger.info(
+                    "All %d unique action button(s) are disabled — skipping testActionButtons",
+                    len(unique_buttons),
+                )
+                results.append(FormTestResult(
+                    element_type="BUTTON",
+                    group_name="dropdown_actions",
+                    label=f"{len(unique_buttons)} button(s) all disabled",
+                    action="button_disabled_after_dropdown",
+                    success=False,
+                    error_message="All action buttons disabled; no dropdown dependency satisfied",
+                ))
+                return results
+
+            for b in active_buttons:
                 try:
-                    if b.get("disabled"):
-                        logger.error("Action button not enabled after dropdown selection")
-                        results.append(FormTestResult(
-                            element_type="BUTTON",
-                            group_name="dropdown_actions",
-                            label=b.get("text", ""),
-                            action="button_disabled_after_dropdown",
-                            success=False,
-                        ))
-                        continue
                     clicked = await self.page.evaluate("""
                         (b) => {
                             const sels = 'button, input[type="button"], input[type="submit"], [role="button"], a';

@@ -121,6 +121,9 @@ class Crawler:
         # START: Intelligent UI Analysis & Navigation Testing
         self.ui_inventory       = UIInventory(run_id, start_url)
         # END: Intelligent UI Analysis & Navigation Testing
+        # GLOBAL dedup: NAV_ITEMs (navbar/sidebar) are the SAME on every page.
+        # Track their fingerprints crawl-wide so they are tested only ONCE.
+        self._global_nav_fingerprints: set = set()
 
     async def run(self) -> list[str]:
         """
@@ -385,6 +388,11 @@ class Crawler:
         # ── INTERACTOR LOOP with section grouping ──────────────────────────────
         # Index-based while loop with processed-set deduplication.
         # CHECKBOX and RADIO are skipped here — already handled by form_tester above.
+        #
+        # DEDUP GUARANTEE: Every element is identified by its structural fingerprint.
+        # The `processed` set is NEVER cleared between drift-recovery cycles —
+        # re-discovered elements are filtered through it, so no element is ever
+        # interacted with more than once per page test.
         element_list = list(elements)
         processed: set = set()
         idx = 0
@@ -410,11 +418,9 @@ class Crawler:
             # Build dedup key using structural fingerprint so it survives
             # page drift + back-navigation re-discovery cycles.
             # Falls back to (selector, label, type) for elements without fingerprints.
-            # START: Sidebar Navigation Processing
             elem_key = elem.fingerprint if elem.fingerprint else (
                 elem.selector, elem.label, elem.element_type.name
             )
-            # END: Sidebar Navigation Processing
 
             if elem_key in processed:
                 idx += 1
@@ -427,8 +433,17 @@ class Crawler:
                 success = await self._safe_navigate(canonical_url)
                 if not success:
                     break
-                element_list = await finder.discover()
-                current_section = ""   # reset section on rediscover
+                # Re-discover fresh handles BUT keep processed set intact.
+                # Filter out already-tested elements so we never re-test.
+                new_elements = await finder.discover()
+                element_list = [
+                    e for e in new_elements
+                    if (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
+                    not in processed
+                    and e.element_type not in _FORM_TESTER_HANDLED
+                    and e.element_type not in _SIDEBAR_HANDLED
+                ]
+                current_section = ""   # reset section header only
                 idx = 0
                 continue
 
@@ -466,13 +481,20 @@ class Crawler:
                 )
                 console.print_action(True, result.element_type, result.element_label, result.action_performed)
 
-                # Drift check AFTER success
+                # Drift check AFTER success — same safe re-discovery logic
                 if self._normalize(self.page.url) != self._normalize(canonical_url):
                     logger.debug("Post-interact drift detected, recovering to %s", canonical_url)
                     success = await self._safe_navigate(canonical_url)
                     if not success:
                         break
-                    element_list = await finder.discover()
+                    new_elements = await finder.discover()
+                    element_list = [
+                        e for e in new_elements
+                        if (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
+                        not in processed
+                        and e.element_type not in _FORM_TESTER_HANDLED
+                        and e.element_type not in _SIDEBAR_HANDLED
+                    ]
                     current_section = ""
                     idx = 0
 
@@ -500,12 +522,19 @@ class Crawler:
                     "message": result.error_message[:80],
                 })
 
-                # Navigate back if drifted after error
+                # Navigate back if drifted after error — same safe re-discovery
                 if self._normalize(self.page.url) != self._normalize(canonical_url):
                     success = await self._safe_navigate(canonical_url)
                     if not success:
                         break
-                    element_list = await finder.discover()
+                    new_elements = await finder.discover()
+                    element_list = [
+                        e for e in new_elements
+                        if (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
+                        not in processed
+                        and e.element_type not in _FORM_TESTER_HANDLED
+                        and e.element_type not in _SIDEBAR_HANDLED
+                    ]
                     current_section = ""
                     idx = 0
 
@@ -580,16 +609,27 @@ class Crawler:
         """
         passed = failed = skipped = 0
 
-        # Only unprocessed sidebar elements (fingerprint not yet in processed)
+        # Only unprocessed sidebar elements:
+        #   - fingerprint not yet in this page's processed set, AND
+        #   - fingerprint not yet in the crawl-wide nav fingerprint set
+        #     (same navbar appears on every page — test it ONCE globally)
         pending = [
             e for e in nav_elements
-            if (e.fingerprint or (e.selector, e.label, e.element_type.name))
-            not in processed
+            if (
+                (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
+                not in processed
+            ) and (
+                (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
+                not in self._global_nav_fingerprints
+            )
         ]
 
         total = len(pending)
         if total == 0:
-            logger.info("[Sidebar] All %d sidebar elements already processed — skipping pass", len(nav_elements))
+            logger.info(
+                "[Sidebar] All %d sidebar elements already processed (page or global) — skipping pass",
+                len(nav_elements)
+            )
             return (0, 0, 0)
 
         logger.info("[Sidebar] Total sidebar elements found: %d", total)
@@ -628,7 +668,9 @@ class Crawler:
                 continue
 
             # Mark processed immediately — regardless of outcome
+            # Also add to the crawl-wide nav set to prevent re-testing on other pages
             processed.add(elem_key)
+            self._global_nav_fingerprints.add(elem_key)
 
             if result.action_performed.startswith("skipped_stale"):
                 logger.debug("[Sidebar] Stale sidebar element skipped: %s", label_str)
