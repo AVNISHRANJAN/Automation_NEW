@@ -193,6 +193,7 @@ async def main() -> None:
             report_path=report_path,
             screenshot_dir=str(ss_dir),
             excel_path=excel_path,
+            inventory_path=crawler.ui_inventory.saved_path,
         )
 
 

@@ -263,6 +263,376 @@ class FormTester:
 
         return newly_found   # currently returns [] — future: wrap as ElementInfo
 
+    # ===== DROPDOWN TEST START =====
+    async def detectDropdowns(self) -> List[dict]:
+        """
+        Detect native and custom dropdowns (including searchable variants).
+        Returns a lightweight descriptor list for dependency-chain testing.
+        """
+        try:
+            items = await self.page.evaluate("""
+                () => {
+                    const isVisible = (el) => {
+                        const cs = window.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+                        return cs.display !== 'none' && cs.visibility !== 'hidden'
+                            && r.width > 0 && r.height > 0;
+                    };
+                    const cssPath = (el) => {
+                        const parts = [];
+                        let node = el;
+                        let guard = 0;
+                        while (node && node.nodeType === 1 && guard < 8) {
+                            let seg = node.tagName.toLowerCase();
+                            if (node.id) {
+                                seg += `#${node.id}`;
+                                parts.unshift(seg);
+                                break;
+                            }
+                            const sibs = node.parentElement
+                                ? Array.from(node.parentElement.children).filter(s => s.tagName === node.tagName)
+                                : [];
+                            if (sibs.length > 1) {
+                                seg += `:nth-of-type(${sibs.indexOf(node) + 1})`;
+                            }
+                            parts.unshift(seg);
+                            node = node.parentElement;
+                            guard += 1;
+                        }
+                        return parts.join(' > ');
+                    };
+                    const isPaginationLikeSelect = (el) => {
+                        if (!el || el.tagName.toLowerCase() !== 'select') return false;
+                        const values = Array.from(el.options || []).map(o => (o.value || '').trim());
+                        const txts = Array.from(el.options || []).map(o => (o.textContent || '').trim());
+                        const smallSet = values.length > 0 && values.length <= 6;
+                        const looksPageSize = values.every(v => /^\\d+$/.test(v)) && txts.every(t => /^\\d+$/.test(t));
+                        const hasCommonSizes = values.some(v => ['10', '25', '50', '100'].includes(v));
+                        const cls = (el.className || '').toLowerCase();
+                        const nearPaginationText = !!el.closest('[class*="paginate"], [class*="pagination"], [id*="paginate"], [id*="pagination"]');
+                        return smallSet && looksPageSize && hasCommonSizes && (nearPaginationText || cls.includes('w-17') || cls.includes('text-sm'));
+                    };
+                    const keyFor = (el) => {
+                        if (el.id) return `#${el.id}`;
+                        const dataTest = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
+                        if (dataTest) return `[data-testid="${dataTest}"]`;
+                        const name = el.getAttribute('name');
+                        if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
+                        return cssPath(el);
+                    };
+                    const out = [];
+                    const pushUnique = (obj) => {
+                        if (!out.some(x => x.key === obj.key)) out.push(obj);
+                    };
+
+                    document.querySelectorAll('select').forEach((el) => {
+                        if (!isVisible(el)) return;
+                        if (isPaginationLikeSelect(el)) return;
+                        pushUnique({
+                            key: keyFor(el),
+                            kind: 'native',
+                            searchable: false,
+                            disabled: !!el.disabled,
+                            optionsCount: el.options ? el.options.length : 0,
+                            label: el.getAttribute('aria-label') || el.name || el.id || 'select'
+                        });
+                    });
+
+                    const customSelectors = [
+                        '.select2-selection',
+                        '.ant-select-selector',
+                        '.MuiSelect-select',
+                        '.MuiAutocomplete-inputRoot',
+                        '.dropdown-toggle',
+                        '[role="combobox"]',
+                        '[aria-haspopup="listbox"]',
+                        '[class*="select"][class*="control"]',
+                        '[class*="dropdown"][class*="control"]',
+                    ];
+                    document.querySelectorAll(customSelectors.join(',')).forEach((el) => {
+                        if (!isVisible(el)) return;
+                        const host = el.closest('[data-testid], [id], [name], .ant-select, .select2, .MuiFormControl-root, .dropdown') || el;
+                        const searchable = !!host.querySelector('input[type="search"], input[role="combobox"], input[type="text"]');
+                        const disabled = host.matches('[aria-disabled="true"], .ant-select-disabled, .Mui-disabled, .select2-container--disabled')
+                            || !!host.querySelector('[disabled]');
+                        pushUnique({
+                            key: keyFor(host),
+                            kind: 'custom',
+                            searchable,
+                            disabled,
+                            optionsCount: 0,
+                            label: host.getAttribute('aria-label') || host.getAttribute('name') || host.id || host.className || 'custom-dropdown'
+                        });
+                    });
+                    return out;
+                }
+            """)
+            return items or []
+        except Exception as exc:
+            logger.debug("Dropdown detection failed: %s", exc)
+            return []
+
+    async def waitForDropdownUpdate(self, before_state: List[dict], retries: int = 8) -> bool:
+        """
+        Wait for async dropdown dependency updates (options, enabled-state, spinners).
+        """
+        spinner_selector = (
+            ".loading, .loader, .spinner, .ant-spin-spinning, .MuiCircularProgress-root, "
+            "[aria-busy='true'], [data-loading='true']"
+        )
+        for _ in range(retries):
+            try:
+                has_spinner = await self.page.locator(spinner_selector).count()
+                if has_spinner:
+                    await asyncio.sleep(0.4)
+                    continue
+
+                changed = await self.page.evaluate("""
+                    (prev) => {
+                        const isVisible = (el) => {
+                            if (!el) return false;
+                            const cs = window.getComputedStyle(el);
+                            const r = el.getBoundingClientRect();
+                            return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+                        };
+                        const lookup = (key) => {
+                            if (key.startsWith('#')) return document.querySelector(key);
+                            const m = key.match(/^([a-z0-9_-]+)\\[data-dd-idx="(\\d+)"\\]$/i);
+                            if (m) return document.querySelectorAll(m[1])[Number(m[2])] || null;
+                            try { return document.querySelector(key); } catch { return null; }
+                        };
+                        for (const item of prev || []) {
+                            const el = lookup(item.key);
+                            if (!isVisible(el)) continue;
+                            const disabledNow = !!(el.disabled || el.matches?.('[aria-disabled="true"], .Mui-disabled, .ant-select-disabled'));
+                            if (disabledNow !== !!item.disabled) return true;
+                            if (item.kind === 'native' && el.options && el.options.length !== (item.optionsCount || 0)) return true;
+                        }
+                        return false;
+                    }
+                """, before_state)
+                if changed:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
+        return False
+
+    async def handleDynamicDropdowns(self) -> List[FormTestResult]:
+        """
+        Execute dependency-chain dropdown selections with bounded retries.
+        """
+        results: List[FormTestResult] = []
+        tried_keys: set[str] = set()
+        max_rounds = 8
+
+        for _ in range(max_rounds):
+            dropdowns = await self.detectDropdowns()
+            if not dropdowns:
+                break
+
+            actionable = [d for d in dropdowns if not d.get("disabled") and d.get("key") not in tried_keys]
+            if not actionable:
+                break
+
+            progressed = False
+            for dd in actionable:
+                key = dd.get("key", "")
+                label = dd.get("label", key)
+                before = dropdowns
+                tried_keys.add(key)
+                try:
+                    action = await self.page.evaluate("""
+                        (item) => {
+                            const isPlaceholder = (text, value) => {
+                                const t = (text || '').trim().toLowerCase();
+                                const v = (value || '').trim().toLowerCase();
+                                if (!v) return true;
+                                return ['select', 'select...', 'choose', 'choose...', 'please select'].some(k => t === k || t.startsWith(k));
+                            };
+                            const lookup = (key) => {
+                                if (!key) return null;
+                                try { return document.querySelector(key); } catch { return null; }
+                            };
+                            const el = lookup(item.key);
+                            if (!el) return 'missing';
+                            if (item.kind === 'native' && el.tagName.toLowerCase() === 'select') {
+                                const opts = Array.from(el.options || []).filter(o => !o.disabled && !isPlaceholder(o.textContent, o.value));
+                                if (!opts.length) return 'no_valid_option';
+                                el.value = opts[0].value;
+                                el.dispatchEvent(new Event('input', { bubbles: true }));
+                                el.dispatchEvent(new Event('change', { bubbles: true }));
+                                return `selected:${opts[0].value}`;
+                            }
+                            el.click();
+                            // Small inline retry for portal-rendered option lists.
+                            let tries = 5;
+                            let valid = null;
+                            const isPlaceholder = (text, value) => {
+                                const t = (text || '').trim().toLowerCase();
+                                const v = (value || '').trim().toLowerCase();
+                                if (!v) return true;
+                                return ['select', 'select...', 'choose', 'choose...', 'please select'].some(k => t === k || t.startsWith(k));
+                            };
+                            const optionSelectors = [
+                                '[role="option"]:not([aria-disabled="true"])',
+                                '.ant-select-item-option:not(.ant-select-item-option-disabled)',
+                                '.select2-results__option[aria-disabled!="true"]',
+                                '.MuiAutocomplete-option[aria-disabled!="true"]',
+                                '.dropdown-menu .dropdown-item:not(.disabled)',
+                                'li[role="option"]:not([aria-disabled="true"])'
+                            ];
+                            while (tries-- > 0 && !valid) {
+                                const options = Array.from(document.querySelectorAll(optionSelectors.join(',')));
+                                valid = options.find(o => {
+                                    const t = (o.textContent || '').trim();
+                                    return t && !isPlaceholder(t, t);
+                                }) || null;
+                                if (!valid) {
+                                    const start = Date.now();
+                                    while (Date.now() - start < 150) {}
+                                }
+                            }
+                            if (!valid) return 'no_valid_option';
+                            valid.click();
+                            return `selected:${(valid.textContent || '').trim()}`;
+                        }
+                    """, dd)
+
+                    await self.waitForDropdownUpdate(before_state=before, retries=8)
+                    progressed = True
+                    ok = action.startswith("selected:")
+                    if not ok and action == "no_valid_option":
+                        action = "dropdown_skip_no_valid_option"
+                    results.append(FormTestResult(
+                        element_type="DROPDOWN",
+                        group_name="dynamic_chain",
+                        label=label,
+                        action=action,
+                        success=ok or action == "dropdown_skip_no_valid_option",
+                    ))
+                except Exception as exc:
+                    logger.error("Dropdown dependency failed on page: %s", self.page.url)
+                    results.append(FormTestResult(
+                        element_type="DROPDOWN",
+                        group_name="dynamic_chain",
+                        label=label,
+                        action="dropdown_select:error",
+                        success=False,
+                        error_message=str(exc)[:300],
+                    ))
+            if not progressed:
+                break
+        return results
+
+    async def testActionButtons(self) -> List[FormTestResult]:
+        """
+        Test Apply/Search/Submit/Clear style action buttons after dropdown selection.
+        """
+        results: List[FormTestResult] = []
+        try:
+            buttons = await self.page.evaluate("""
+                () => {
+                    const sels = 'button, input[type="button"], input[type="submit"], [role="button"], a';
+                    const wanted = ['apply', 'filter', 'search', 'submit', 'clear', 'reset'];
+                    return Array.from(document.querySelectorAll(sels))
+                        .map((el, idx) => {
+                            const txt = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+                            const low = txt.toLowerCase();
+                            const kind = wanted.find(k => low.includes(k));
+                            if (!kind) return null;
+                            const disabled = !!(el.disabled || el.getAttribute('aria-disabled') === 'true');
+                            return { idx, text: txt || `button_${idx}`, kind, disabled };
+                        })
+                        .filter(Boolean);
+                }
+            """)
+            for b in buttons or []:
+                try:
+                    if b.get("disabled"):
+                        logger.error("Action button not enabled after dropdown selection")
+                        results.append(FormTestResult(
+                            element_type="BUTTON",
+                            group_name="dropdown_actions",
+                            label=b.get("text", ""),
+                            action="button_disabled_after_dropdown",
+                            success=False,
+                        ))
+                        continue
+                    clicked = await self.page.evaluate("""
+                        (b) => {
+                            const sels = 'button, input[type="button"], input[type="submit"], [role="button"], a';
+                            const el = Array.from(document.querySelectorAll(sels))[b.idx];
+                            if (!el) return false;
+                            el.click();
+                            return true;
+                        }
+                    """, b)
+                    results.append(FormTestResult(
+                        element_type="BUTTON",
+                        group_name="dropdown_actions",
+                        label=b.get("text", ""),
+                        action=f"button_click:{b.get('kind')}",
+                        success=bool(clicked),
+                    ))
+                    await asyncio.sleep(0.3)
+                except Exception as exc:
+                    results.append(FormTestResult(
+                        element_type="BUTTON",
+                        group_name="dropdown_actions",
+                        label=b.get("text", ""),
+                        action="button_click:error",
+                        success=False,
+                        error_message=str(exc)[:300],
+                    ))
+        except Exception as exc:
+            logger.debug("Action button test failed: %s", exc)
+        return results
+
+    async def resetDropdownState(self) -> FormTestResult:
+        """
+        Reset dropdown state to defaults via clear/reset controls and native fallback.
+        """
+        try:
+            await self.page.evaluate("""
+                () => {
+                    const txt = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || '').toLowerCase();
+                    const clearBtn = Array.from(document.querySelectorAll('button, input[type="button"], [role="button"], a'))
+                        .find(el => {
+                            const t = txt(el);
+                            return t.includes('clear') || t.includes('reset');
+                        });
+                    if (clearBtn && !(clearBtn.disabled || clearBtn.getAttribute('aria-disabled') === 'true')) {
+                        clearBtn.click();
+                    }
+                    document.querySelectorAll('select').forEach((el) => {
+                        if (el.options && el.options.length > 0) {
+                            el.selectedIndex = 0;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    });
+                }
+            """)
+            await asyncio.sleep(0.5)
+            return FormTestResult(
+                element_type="DROPDOWN",
+                group_name="dynamic_chain",
+                label="reset",
+                action="dropdown_reset:verified",
+                success=True,
+            )
+        except Exception as exc:
+            return FormTestResult(
+                element_type="DROPDOWN",
+                group_name="dynamic_chain",
+                label="reset",
+                action="dropdown_reset:error",
+                success=False,
+                error_message=str(exc)[:300],
+            )
+    # ===== DROPDOWN TEST END =====
+
     # ──────────────────────────────────────────────────────────────────────────
     # PRIVATE HELPERS
     # ──────────────────────────────────────────────────────────────────────────

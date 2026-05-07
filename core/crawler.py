@@ -40,6 +40,7 @@ from core.interactor import Interactor
 from core.form_tester import FormTester, ElementManifestExporter
 from reporting.screenshot_manager import ScreenshotManager
 from reporting.metadata_logger import MetadataLogger
+from reporting.ui_inventory import UIInventory
 from reporting import console
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,13 @@ _BROKEN_SIGNALS: tuple = (
 # Element types handled exclusively by form_tester (not re-tested in interactor loop).
 _FORM_TESTER_HANDLED = frozenset({ElementType.CHECKBOX, ElementType.RADIO})
 
+# START: Sidebar Navigation Processing
+# NAV_ITEM is excluded from the main interactor loop and processed
+# sequentially by _run_sidebar_navigation() after all other elements.
+# This prevents sidebar clicks from disrupting mid-page form testing.
+_SIDEBAR_HANDLED = frozenset({ElementType.NAV_ITEM})
+# END: Sidebar Navigation Processing
+
 # Mapping from ElementType to display section name for grouped terminal output.
 _SECTION_LABELS: dict = {
     ElementType.BUTTON:       "BUTTONS",
@@ -83,6 +91,9 @@ _SECTION_LABELS: dict = {
     ElementType.TAB:          "TABS",
     ElementType.FORM:         "FORMS",
     ElementType.OTHER:        "OTHER",
+    # ===== Sidebar Detection Enhancement START =====
+    ElementType.NAV_ITEM:     "SIDEBAR_NAV",
+    # ===== Sidebar Detection Enhancement END =====
 }
 
 
@@ -107,6 +118,9 @@ class Crawler:
         self.form_tester        = FormTester(page)
         run_id = metadata_logger.run_id
         self.manifest_exporter  = ElementManifestExporter(run_id)
+        # START: Intelligent UI Analysis & Navigation Testing
+        self.ui_inventory       = UIInventory(run_id, start_url)
+        # END: Intelligent UI Analysis & Navigation Testing
 
     async def run(self) -> list[str]:
         """
@@ -143,12 +157,21 @@ class Crawler:
             summary["total_elements"],
         )
 
+        # START: Intelligent UI Analysis & Navigation Testing
+        # Save UI inventory (classified JSON grouped by functionality module)
+        self.ui_inventory.save()
+        # END: Intelligent UI Analysis & Navigation Testing
+
         console.print_crawl_complete(len(self.visited))
 
         return list(self.visited)
 
     async def _test_page(self, url: str) -> None:
         """Full element testing cycle for a single page."""
+
+        # START: Intelligent Recursive Functional Testing
+        logger.info("[Recursive] Full page inspection started: %s", url)
+        # END: Intelligent Recursive Functional Testing
 
         success = await self._safe_navigate(url)
         if not success:
@@ -192,11 +215,32 @@ class Crawler:
             console.print_iframe_found(len(iframe_elements))
             elements = elements + iframe_elements
 
+        # ===== Sidebar Detection Enhancement START =====
+        # discover_sidebar_elements() runs a second targeted pass using
+        # SIDEBAR_SELECTORS (div/span/li/SVG/onclick/aria-label nav patterns).
+        # It shares finder._seen_handles so elements already found above are
+        # NEVER duplicated — zero risk of double-testing.
+        sidebar_elements = await finder.discover_sidebar_elements(finder._seen_handles)
+        if sidebar_elements:
+            logger.info("[Sidebar Detection] %d sidebar element(s) added to test set", len(sidebar_elements))
+            elements = elements + sidebar_elements
+        # ===== Sidebar Detection Enhancement END =====
+
         # Record elements to manifest
         self.manifest_exporter.record_page(url, elements)
 
+        # START: Intelligent UI Analysis & Navigation Testing
+        # Ingest elements into UI inventory (enriches with xpath/parent/classification)
+        # Called before the interaction loop so handles are still fresh.
+        await self.ui_inventory.ingest(url, elements, self.page)
+        # END: Intelligent UI Analysis & Navigation Testing
+
         # Print element count
         console.print_element_count(len(elements))
+
+        # START: Intelligent Recursive Functional Testing
+        logger.info("[Recursive] Testing current page functionality: %s", url)
+        # END: Intelligent Recursive Functional Testing
 
         # ── SECTION: FORMS (checkbox + radio via form_tester) ─────────────────
         page_errors: list[dict] = []   # collect per-page errors for the error block
@@ -259,6 +303,85 @@ class Crawler:
                 )
                 page_errors.append({"label": r.label, "action": r.action, "message": r.error_message})
 
+        # ===== DROPDOWN TEST START =====
+        dropdown_results = await self.form_tester.handleDynamicDropdowns()
+        for r in dropdown_results:
+            console.print_form_group_result(r.success, "DROPDOWN_CHAIN", r.group_name, r.label, r.action)
+            if r.success:
+                page_passed += 1
+                self.metadata_logger.log_action(
+                    url=url, action=r.action,
+                    element_label=r.label, element_type="DROPDOWN"
+                )
+            else:
+                page_failed += 1
+                ss_path = await self.screenshot_manager.capture_error(
+                    page=self.page, url=url,
+                    action=r.action, error_type="dropdown_dependency_failure"
+                )
+                self.metadata_logger.log_error(
+                    url=url, action=r.action,
+                    error_type="dropdown_dependency_failure",
+                    error_message=r.error_message,
+                    element_label=r.label, element_type="DROPDOWN",
+                    screenshot_path=ss_path,
+                )
+                page_errors.append({"label": r.label, "action": r.action, "message": r.error_message})
+
+        action_btn_results = await self.form_tester.testActionButtons()
+        for r in action_btn_results:
+            console.print_form_group_result(r.success, "DROPDOWN_ACTIONS", r.group_name, r.label, r.action)
+            if r.success:
+                page_passed += 1
+                self.metadata_logger.log_action(
+                    url=url, action=r.action,
+                    element_label=r.label, element_type="BUTTON"
+                )
+            else:
+                page_failed += 1
+                ss_path = await self.screenshot_manager.capture_error(
+                    page=self.page, url=url,
+                    action=r.action, error_type="dropdown_action_button_failure"
+                )
+                self.metadata_logger.log_error(
+                    url=url, action=r.action,
+                    error_type="dropdown_action_button_failure",
+                    error_message=r.error_message,
+                    element_label=r.label, element_type="BUTTON",
+                    screenshot_path=ss_path,
+                )
+                page_errors.append({"label": r.label, "action": r.action, "message": r.error_message})
+
+        reset_result = await self.form_tester.resetDropdownState()
+        console.print_form_group_result(
+            reset_result.success, "DROPDOWN_RESET", reset_result.group_name, reset_result.label, reset_result.action
+        )
+        if reset_result.success:
+            page_passed += 1
+            self.metadata_logger.log_action(
+                url=url, action=reset_result.action,
+                element_label=reset_result.label, element_type="DROPDOWN"
+            )
+        else:
+            page_failed += 1
+            ss_path = await self.screenshot_manager.capture_error(
+                page=self.page, url=url,
+                action=reset_result.action, error_type="dropdown_reset_failure"
+            )
+            self.metadata_logger.log_error(
+                url=url, action=reset_result.action,
+                error_type="dropdown_reset_failure",
+                error_message=reset_result.error_message,
+                element_label=reset_result.label, element_type="DROPDOWN",
+                screenshot_path=ss_path,
+            )
+            page_errors.append({
+                "label": reset_result.label,
+                "action": reset_result.action,
+                "message": reset_result.error_message
+            })
+        # ===== DROPDOWN TEST END =====
+
         # ── INTERACTOR LOOP with section grouping ──────────────────────────────
         # Index-based while loop with processed-set deduplication.
         # CHECKBOX and RADIO are skipped here — already handled by form_tester above.
@@ -277,8 +400,21 @@ class Crawler:
                 idx += 1
                 continue
 
-            # Build a dedup key
-            elem_key = (elem.selector, elem.label, elem.element_type.name)
+            # START: Sidebar Navigation Processing
+            # Skip NAV_ITEM — handled sequentially after this loop
+            if elem.element_type in _SIDEBAR_HANDLED:
+                idx += 1
+                continue
+            # END: Sidebar Navigation Processing
+
+            # Build dedup key using structural fingerprint so it survives
+            # page drift + back-navigation re-discovery cycles.
+            # Falls back to (selector, label, type) for elements without fingerprints.
+            # START: Sidebar Navigation Processing
+            elem_key = elem.fingerprint if elem.fingerprint else (
+                elem.selector, elem.label, elem.element_type.name
+            )
+            # END: Sidebar Navigation Processing
 
             if elem_key in processed:
                 idx += 1
@@ -377,6 +513,30 @@ class Crawler:
         if page_errors:
             console.print_error_block(page_errors)
 
+        # START: Intelligent Recursive Functional Testing
+        # Run sidebar navigation AFTER all other element testing on this page.
+        # When a sidebar click opens a NEW unvisited page, recursively call
+        # _test_page() to fully test it before continuing to the next sidebar item.
+        # self.visited prevents re-testing any page regardless of recursion depth.
+        nav_elements = [e for e in elements if e.element_type in _SIDEBAR_HANDLED]
+        if nav_elements:
+            logger.info("[Recursive] Current page fully tested: %s", url)
+            logger.info("[Recursive] Sidebar detected. Creating sidebar inventory (%d items).",
+                        len(nav_elements))
+            sb_passed, sb_failed, sb_skipped = await self._run_sidebar_navigation(
+                url=url,
+                canonical_url=canonical_url,
+                nav_elements=nav_elements,
+                processed=processed,
+                finder=finder,
+            )
+            page_passed  += sb_passed
+            page_failed  += sb_failed
+            page_skipped += sb_skipped
+        else:
+            logger.info("[Recursive] Current page fully tested: %s", url)
+        # END: Intelligent Recursive Functional Testing
+
         # ── Per-page summary ───────────────────────────────────────────────────
         console.print_page_summary(page_passed, page_failed, page_skipped)
 
@@ -391,6 +551,155 @@ class Crawler:
                     enqueued += 1
 
         console.print_links_enqueued(enqueued, len(self.queue))
+
+    # START: Sidebar Navigation Processing
+    async def _run_sidebar_navigation(
+        self,
+        url: str,
+        canonical_url: str,
+        nav_elements: list,
+        processed: set,
+        finder,
+    ) -> tuple:
+        """
+        Sequentially click each sidebar/navigation element EXACTLY ONCE.
+
+        Algorithm:
+          1. Pre-filter against the shared processed set (fingerprint-based).
+          2. For each unprocessed element (in discovery order):
+               a. Ensure we are on canonical_url before clicking.
+               b. Interact via self.interactor.interact().
+               c. Mark fingerprint as processed immediately (even on failure).
+               d. Check for drift → navigate back to canonical_url.
+               e. Log item N/M with label for traceability.
+          3. Never restart the loop; never click the same element twice.
+          4. Return (passed, failed, skipped) deltas.
+
+        Sidebar elements are processed AFTER the main interactor loop to
+        prevent nav drift from disrupting form/button/input testing.
+        """
+        passed = failed = skipped = 0
+
+        # Only unprocessed sidebar elements (fingerprint not yet in processed)
+        pending = [
+            e for e in nav_elements
+            if (e.fingerprint or (e.selector, e.label, e.element_type.name))
+            not in processed
+        ]
+
+        total = len(pending)
+        if total == 0:
+            logger.info("[Sidebar] All %d sidebar elements already processed — skipping pass", len(nav_elements))
+            return (0, 0, 0)
+
+        logger.info("[Sidebar] Total sidebar elements found: %d", total)
+        console.print_section_header("SIDEBAR_NAV")
+
+        for item_idx, elem in enumerate(pending, start=1):
+            elem_key = elem.fingerprint if elem.fingerprint else (
+                elem.selector, elem.label, elem.element_type.name
+            )
+
+            # Guard: skip if processed by a concurrent/earlier cycle
+            if elem_key in processed:
+                logger.info("[Sidebar] Skipping already processed sidebar item: %s", elem.label)
+                skipped += 1
+                continue
+
+            # Ensure we are on the canonical page before each sidebar click
+            if self._normalize(self.page.url) != self._normalize(canonical_url):
+                logger.debug("[Sidebar] Pre-click drift detected, recovering to %s", canonical_url)
+                ok = await self._safe_navigate(canonical_url)
+                if not ok:
+                    logger.warning("[Sidebar] Could not return to dashboard — aborting sidebar pass")
+                    break
+
+            label_str = elem.label or elem.attrs.get("aria-label", "") or elem.selector
+            logger.info("[Sidebar] Clicking sidebar item %d/%d: %s", item_idx, total, label_str)
+
+            try:
+                result = await self.interactor.interact(elem)
+            except Exception as exc:
+                logger.error("[Sidebar] Sidebar navigation failed safely on '%s': %s", label_str, exc)
+                processed.add(elem_key)
+                failed += 1
+                # Always return to canonical after an exception
+                await self._safe_navigate(canonical_url)
+                continue
+
+            # Mark processed immediately — regardless of outcome
+            processed.add(elem_key)
+
+            if result.action_performed.startswith("skipped_stale"):
+                logger.debug("[Sidebar] Stale sidebar element skipped: %s", label_str)
+                console.print_action(True, result.element_type, label_str, result.action_performed)
+                self.metadata_logger.log_action(
+                    url=url, action=result.action_performed,
+                    element_label=label_str, element_type=result.element_type,
+                )
+                skipped += 1
+
+            elif result.success:
+                logger.info("[Sidebar] Sidebar element processed successfully: %s", label_str)
+                console.print_action(True, result.element_type, label_str, result.action_performed)
+                self.metadata_logger.log_action(
+                    url=url, action=result.action_performed,
+                    element_label=label_str, element_type=result.element_type,
+                )
+                passed += 1
+
+            else:
+                logger.error("[Sidebar] Sidebar navigation failed safely on '%s': %s",
+                             label_str, result.error_message[:120])
+                ss_path = await self.screenshot_manager.capture_error(
+                    page=self.page, url=url,
+                    action=result.action_performed, error_type="sidebar_interaction_error",
+                )
+                self.metadata_logger.log_error(
+                    url=url, action=result.action_performed,
+                    error_type="sidebar_interaction_error",
+                    error_message=result.error_message,
+                    element_label=label_str, element_type=result.element_type,
+                    screenshot_path=ss_path,
+                )
+                console.print_action(False, result.element_type, label_str, "ERROR captured")
+                failed += 1
+
+            # START: Intelligent Recursive Functional Testing
+            # After each sidebar click, check if a new page was opened.
+            # If the destination is unvisited and same-domain: fully test it
+            # recursively BEFORE returning to the canonical dashboard URL.
+            # self.visited is the global BFS dedup set — adding here prevents
+            # the BFS loop from re-testing the same page later.
+            current_url = self.page.url
+            if self._normalize(current_url) != self._normalize(canonical_url):
+                norm_current = self._normalize(current_url)
+                if (norm_current
+                        and norm_current not in self.visited
+                        and self._is_same_domain(current_url)):
+                    logger.info("[Recursive] New page detected after sidebar item %d/%d: %s",
+                                item_idx, total, current_url)
+                    logger.info("[Recursive] Starting recursive testing of: %s", current_url)
+                    self.visited.add(norm_current)
+                    await self._test_page(current_url)
+                    logger.info("[Recursive] Recursive testing complete. Returning to parent page.")
+                else:
+                    logger.info("[Recursive] Skipping already tested page: %s", current_url)
+
+                logger.info("[Sidebar] Returning to dashboard after sidebar item %d/%d",
+                            item_idx, total)
+                ok = await self._safe_navigate(canonical_url)
+                if not ok:
+                    logger.warning("[Sidebar] Could not return to dashboard — aborting sidebar pass")
+                    break
+            # END: Intelligent Recursive Functional Testing
+
+        logger.info(
+            "[Sidebar] Sidebar pass complete: %d passed, %d failed, %d skipped",
+            passed, failed, skipped,
+        )
+        return (passed, failed, skipped)
+    # END: Sidebar Navigation Processing
 
     async def _safe_navigate(self, url: str) -> bool:
         """Navigate with error handling. Returns True on success."""

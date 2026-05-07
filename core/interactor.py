@@ -234,6 +234,14 @@ class Interactor:
         elif t == ElementType.TAB:
             return await self._click_tab(info)
 
+        # ===== Sidebar Detection Enhancement START =====
+        elif t == ElementType.NAV_ITEM:
+            # Sidebar/nav elements: treat as a safe click.
+            # _click() already handles destructive keyword checks, tab cleanup,
+            # dialog dismissal, and stale-handle protection.
+            logger.info("[Sidebar Detection] SVG navigation element captured: %s", info.label)
+            return await self._click(info)
+        # ===== Sidebar Detection Enhancement END =====
 
         else:
             return await self._click(info)
