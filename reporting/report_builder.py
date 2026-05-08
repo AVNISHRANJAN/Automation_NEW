@@ -59,6 +59,7 @@ class ReportBuilder:
                 rel = html.escape(r.screenshot_path)
                 screenshot = f'<br><a href="file://{rel}" target="_blank">📸 screenshot</a>'
 
+            err_msg = html.escape(r.error_message[:120]) if r.error_message else "—"
             rows_html += f"""
             <tr class="{status_cls}">
                 <td class="status-cell">{status_icon}</td>
@@ -66,7 +67,7 @@ class ReportBuilder:
                 <td><code>{html.escape(r.element_type)}</code></td>
                 <td>{html.escape(r.element_label[:60])}</td>
                 <td>{html.escape(r.action[:80])}</td>
-                <td>{html.escape(r.error_message[:120]) if r.error_message else "—"}{screenshot}</td>
+                <td>{err_msg}{screenshot}</td>
             </tr>"""
 
         # ── Visited pages list ────────────────────────────────────────────────
@@ -90,13 +91,22 @@ class ReportBuilder:
                 <td>{html.escape(str(f.get("remediation", ""))[:120])}</td>
             </tr>"""
 
+        no_sec_findings = '<tr><td colspan="7">No security findings detected.</td></tr>'
+        sec_findings_table_body = sec_rows if sec_rows else no_sec_findings
+        
+        escaped_run_id = html.escape(self.run_id)
+        escaped_target_url = html.escape(self.target_url)
+        n_pages = len(visited_pages)
+        n_actions = len(records)
+        n_sec_findings = len(security_findings)
+
         # ── Full HTML ─────────────────────────────────────────────────────────
         report_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Web Auto Tester — {html.escape(self.run_id)}</title>
+  <title>Web Auto Tester — {escaped_run_id}</title>
   <style>
     :root {{
       --bg:       #0f1117;
@@ -201,19 +211,19 @@ class ReportBuilder:
   <header>
     <h1>🤖 Web Auto Tester Report</h1>
     <div class="meta">
-      Run ID: <strong>{html.escape(self.run_id)}</strong> &nbsp;|&nbsp;
-      Target: <strong><a href="{html.escape(self.target_url)}" target="_blank">{html.escape(self.target_url)}</a></strong> &nbsp;|&nbsp;
+      Run ID: <strong>{escaped_run_id}</strong> &nbsp;|&nbsp;
+      Target: <strong><a href="{escaped_target_url}" target="_blank">{escaped_target_url}</a></strong> &nbsp;|&nbsp;
       Generated: {now}
     </div>
   </header>
 
   <div class="summary">
     <div class="card blue">
-      <div class="val">{len(visited_pages)}</div>
+      <div class="val">{n_pages}</div>
       <div class="lbl">Pages Tested</div>
     </div>
     <div class="card blue">
-      <div class="val">{len(records)}</div>
+      <div class="val">{n_actions}</div>
       <div class="lbl">Actions Logged</div>
     </div>
     <div class="card green">
@@ -225,7 +235,7 @@ class ReportBuilder:
       <div class="lbl">Failed</div>
     </div>
     <div class="card blue">
-      <div class="val">{len(security_findings)}</div>
+      <div class="val">{n_sec_findings}</div>
       <div class="lbl">Security Findings</div>
     </div>
   </div>
@@ -247,10 +257,10 @@ class ReportBuilder:
     </tbody>
   </table>
 
-  <h2>🌐 Pages Visited ({len(visited_pages)})</h2>
+  <h2>🌐 Pages Visited ({n_pages})</h2>
   <ul>{pages_html}</ul>
 
-  <h2>🛡️ Security Findings ({len(security_findings)})</h2>
+  <h2>🛡️ Security Findings ({n_sec_findings})</h2>
   <table>
     <thead>
       <tr>
@@ -264,7 +274,7 @@ class ReportBuilder:
       </tr>
     </thead>
     <tbody>
-      {sec_rows if sec_rows else '<tr><td colspan="7">No security findings detected.</td></tr>'}
+      {sec_findings_table_body}
     </tbody>
   </table>
 
