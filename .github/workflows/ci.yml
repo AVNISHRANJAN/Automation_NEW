@@ -38,16 +38,7 @@ jobs:
 
       - name: Syntax check all modules
         run: |
-          python -m py_compile config.py
-          python -m py_compile main.py
-          python -m py_compile core/browser.py
-          python -m py_compile core/crawler.py
-          python -m py_compile core/element_finder.py
-          python -m py_compile core/interactor.py
-          python -m py_compile core/login_detector.py
-          python -m py_compile reporting/screenshot_manager.py
-          python -m py_compile reporting/metadata_logger.py
-          python -m py_compile reporting/report_builder.py
-          python -m py_compile utils/dummy_data.py
-          python -m py_compile utils/url_normalizer.py
-          python -m py_compile utils/waiter.py
+          # ===== VALIDATION FIX START =====
+          # Compile all first-party modules so new files are automatically covered.
+          python -m compileall -q config.py main.py core reporting utils tests
+          # ===== VALIDATION FIX END =====

@@ -61,8 +61,11 @@ class FormTester:
     coordination (radio exclusivity, checkbox toggle, multi-step navigation).
     """
 
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, state_tracker=None):
         self.page = page
+        # Optional crawl-wide state tracker — enables global dedup for form groups.
+        # Falls back gracefully to per-call dedup when not provided.
+        self._state_tracker = state_tracker
 
     # ──────────────────────────────────────────────────────────────────────────
     # PUBLIC API
@@ -92,6 +95,18 @@ class FormTester:
         logger.info("Found %d checkbox group(s) with %d total checkboxes.", len(groups), len(checkboxes))
 
         for group_name, group_cbs in groups.items():
+            # ── Global dedup: skip checkbox groups already tested crawl-wide ──────────────
+            if self._state_tracker is not None:
+                ck_state_key = self._state_tracker.build_state_key(
+                    self.page.url, "checkbox_group", group_name
+                )
+                if self._state_tracker.is_state_tested(ck_state_key):
+                    logger.debug(
+                        "Skipping already tested element: checkbox group '%s'", group_name
+                    )
+                    continue
+                self._state_tracker.mark_state_tested(ck_state_key)
+            # ── END global dedup ──────────────────────────────────────────────────
             for cb in group_cbs:
                 result = await self._test_single_checkbox(cb, group_name)
                 results.append(result)
@@ -121,6 +136,18 @@ class FormTester:
         logger.info("Found %d radio group(s) with %d total options.", len(groups), len(radios))
 
         for group_name, group_radios in groups.items():
+            # ── Global dedup: skip radio groups already tested crawl-wide ───────────────
+            if self._state_tracker is not None:
+                rb_state_key = self._state_tracker.build_state_key(
+                    self.page.url, "radio_group", group_name
+                )
+                if self._state_tracker.is_state_tested(rb_state_key):
+                    logger.debug(
+                        "Skipping already tested element: radio group '%s'", group_name
+                    )
+                    continue
+                self._state_tracker.mark_state_tested(rb_state_key)
+            # ── END global dedup ──────────────────────────────────────────────────
             result = await self._test_radio_group(group_name, group_radios)
             results.extend(result)
 
@@ -441,6 +468,20 @@ class FormTester:
                 label = dd.get("label", key)
                 before = dropdowns
                 tried_keys.add(key)
+
+                # ── Global dropdown dedup: skip if already tested crawl-wide ─────────────
+                if self._state_tracker is not None:
+                    dd_state_key = self._state_tracker.build_state_key(
+                        self.page.url, "dropdown", key
+                    )
+                    if self._state_tracker.is_state_tested(dd_state_key):
+                        logger.debug(
+                            "Skipping duplicate interaction: dropdown '%s' already tested",
+                            label,
+                        )
+                        continue
+                    self._state_tracker.mark_state_tested(dd_state_key)
+                # ── END global dropdown dedup ────────────────────────────────────
                 try:
                     action = await self.page.evaluate("""
                         (item) => {
@@ -465,15 +506,14 @@ class FormTester:
                                 return `selected:${opts[0].value}`;
                             }
                             el.click();
+                            // ===== OPTIMIZATION START =====
+                            // Removed duplicate const isPlaceholder declaration that was
+                            // shadowing the one above (const re-declaration is a SyntaxError
+                            // in strict-mode JS; outer declaration covers this entire scope).
+                            // ===== OPTIMIZATION END =====
                             // Small inline retry for portal-rendered option lists.
                             let tries = 5;
                             let valid = null;
-                            const isPlaceholder = (text, value) => {
-                                const t = (text || '').trim().toLowerCase();
-                                const v = (value || '').trim().toLowerCase();
-                                if (!v) return true;
-                                return ['select', 'select...', 'choose', 'choose...', 'please select'].some(k => t === k || t.startsWith(k));
-                            };
                             const optionSelectors = [
                                 '[role="option"]:not([aria-disabled="true"])',
                                 '.ant-select-item-option:not(.ant-select-item-option-disabled)',

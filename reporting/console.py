@@ -235,6 +235,7 @@ def print_final_summary(
     screenshot_dir: str,
     excel_path: str = "",
     inventory_path: str = "",
+    security_findings: int = 0,
 ) -> None:
     """Print the final execution summary banner."""
     status_line = (
@@ -257,6 +258,7 @@ def print_final_summary(
         print(f"  {_c(_GREEN, 'Excel Report    ')} : {excel_path}")
     if inventory_path:
         print(f"  {_c(_GREEN, 'UI Inventory    ')} : {inventory_path}")
+    print(f"  {_c(_YELLOW, 'Security Issues ')} : {_bold(str(security_findings))}")
     print(f"  {_c(_BLUE, 'Screenshots Dir ')} : {screenshot_dir}")
     print(_sep())
     print(status_line)

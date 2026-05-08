@@ -10,6 +10,8 @@ Design:
   - Password fields are SKIPPED — we log a warning but never fill them
   - Form submits only happen after all fields in the form are filled
   - Selects choose the second option (index 1) to avoid default no-op
+  - Dead-click detection: DOMObserver arms before click, checks after;
+    if no DOM mutation + no URL change → result tagged dead_click=True
 """
 
 import sys
@@ -22,7 +24,7 @@ import logging
 import asyncio
 import random
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +32,8 @@ from playwright.async_api import Page
 
 import config
 from core.element_finder import ElementInfo, ElementType
+# Dead-click detection — installed ONCE per Interactor instance
+from core.mutation_observer import DOMObserver, DOMChangeResult
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,10 @@ class InteractionResult:
     error_message: str = ""
     page_url_before: str = ""
     page_url_after: str = ""
+    # NEW: set True when the click produced no DOM mutation and no URL change
+    dead_click: bool = False
+    # NEW: number of DOM mutations observed (0 on dead click)
+    dom_mutations: int = 0
 
 
 class Interactor:
@@ -92,14 +100,12 @@ class Interactor:
         self.page = page
         # ===== FIX: Persistent dialog handler =====
         # Register ONE persistent dialog handler for the lifetime of this Interactor.
-        # Previously, page.once("dialog", handler) was registered inside _click() for
-        # every button — meaning 7 queued handlers all tried to accept the same dialog,
-        # causing "Cannot accept dialog which is already handled!" spam.
-        # A single persistent on() handler prevents that entirely.
         self._last_dialog_type: str = ""
         self._last_dialog_message: str = ""
         self.page.on("dialog", self._global_dialog_handler)
         # ===== END FIX =====
+        # Dead-click detector — shared across all _click() calls on this page
+        self._observer = DOMObserver(page)
 
     async def _global_dialog_handler(self, dialog) -> None:
         """Persistent page-level dialog dismisser. Accepts all dialogs automatically."""
@@ -291,6 +297,9 @@ class Interactor:
         except Exception:
             pages_before = 1
 
+        # ── Dead-click detection: arm MutationObserver BEFORE the click ────────
+        await self._observer.arm()
+
         await info.handle.scroll_into_view_if_needed()
         await info.handle.click(timeout=config.ACTION_TIMEOUT)
 
@@ -320,6 +329,19 @@ class Interactor:
 
         if self._last_dialog_type:
             return f"click_dialog:{self._last_dialog_type}"
+
+        # ── Dead-click detection: check AFTER the action ────────────────────────
+        # Use DEAD_CLICK_TIMEOUT from config (default 800ms).
+        # check() sleeps internally for the timeout duration, so the poll above
+        # already consumed ~1.5s — we use 0ms here so it reads immediately.
+        dom_result = await self._observer.check(timeout_ms=0)
+        if dom_result.is_dead_click:
+            logger.info(
+                "[DeadClick] No DOM change detected after clicking '%s' — marking dead_click",
+                info.label,
+            )
+            return f"dead_click:{info.label[:40]}"
+
         return "click"
 
     async def _fill(self, info: ElementInfo) -> str:
@@ -483,7 +505,8 @@ class Interactor:
         input_type  = info.input_type.lower()
 
         if input_type == "email" or "email" in label_lower:
-            return random.choice(_DUMMY_EMAILS)
+            # Prefer canonical configured email to make test behaviour deterministic
+            return config.DUMMY_DATA.get("email", random.choice(_DUMMY_EMAILS))
         if input_type == "tel" or "phone" in label_lower or "mobile" in label_lower:
             return random.choice(_DUMMY_PHONES)
         if input_type == "number" or "zip" in label_lower or "postal" in label_lower:

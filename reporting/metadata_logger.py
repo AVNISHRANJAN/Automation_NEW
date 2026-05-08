@@ -46,11 +46,13 @@ class MetadataLogger:
     def __init__(self, run_id: str):
         self.run_id = run_id
         self._records: List[ActionRecord] = []
+        self._security_findings: List[dict] = []
 
         # Prepare log directory and file
         log_dir = config.OUTPUT_DIR / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self._log_path = log_dir / f"{run_id}.jsonl"
+        self._security_path = log_dir / f"{run_id}_security_findings.json"
 
     # ── Write API ──────────────────────────────────────────────────────────────
 
@@ -112,6 +114,22 @@ class MetadataLogger:
         """Return only successful actions."""
         return [r for r in self._records if r.success]
 
+    def log_security_finding(self, finding: dict) -> None:
+        """Record a security finding dictionary."""
+        self._security_findings.append(dict(finding))
+        self._flush_security_findings()
+
+    def log_security_findings(self, findings: List[dict]) -> None:
+        """Append multiple security findings safely."""
+        if not findings:
+            return
+        self._security_findings.extend(dict(f) for f in findings)
+        self._flush_security_findings()
+
+    def get_security_findings(self) -> List[dict]:
+        """Return all collected security findings."""
+        return list(self._security_findings)
+
     # ── Internal ───────────────────────────────────────────────────────────────
 
     def _append_jsonl(self, record: ActionRecord) -> None:
@@ -121,6 +139,13 @@ class MetadataLogger:
                 f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
         except Exception as exc:
             logger.warning("Failed to write JSONL log: %s", exc)
+
+    def _flush_security_findings(self) -> None:
+        try:
+            with self._security_path.open("w", encoding="utf-8") as f:
+                json.dump(self._security_findings, f, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            logger.warning("Failed to write security findings JSON: %s", exc)
 
 
 def _now() -> str:

@@ -38,6 +38,8 @@ import config
 from core.element_finder import ElementFinder, ElementType
 from core.interactor import Interactor
 from core.form_tester import FormTester, ElementManifestExporter
+from core.security_scanner import SecurityScanner
+from core.state_tracker import StateTracker
 from reporting.screenshot_manager import ScreenshotManager
 from reporting.metadata_logger import MetadataLogger
 from reporting.ui_inventory import UIInventory
@@ -73,28 +75,38 @@ _FORM_TESTER_HANDLED = frozenset({ElementType.CHECKBOX, ElementType.RADIO})
 _SIDEBAR_HANDLED = frozenset({ElementType.NAV_ITEM})
 # END: Sidebar Navigation Processing
 
+# ACCORDION elements are tested by _run_accordion_testing() AFTER the main loop
+# (they expand content, so they must not interleave with form/input testing).
+_ACCORDION_HANDLED = frozenset({ElementType.ACCORDION})
+
 # Mapping from ElementType to display section name for grouped terminal output.
 _SECTION_LABELS: dict = {
-    ElementType.BUTTON:       "BUTTONS",
-    ElementType.INPUT_TEXT:   "INPUTS",
-    ElementType.INPUT_EMAIL:  "INPUTS",
-    ElementType.INPUT_TEL:    "INPUTS",
-    ElementType.INPUT_NUMBER: "INPUTS",
-    ElementType.INPUT_SEARCH: "INPUTS",
-    ElementType.INPUT_PASS:   "INPUTS",
-    ElementType.TEXTAREA:     "INPUTS",
-    ElementType.SELECT:       "INPUTS",
-    ElementType.CHECKBOX:     "FORMS",
-    ElementType.RADIO:        "FORMS",
-    ElementType.LINK:         "LINKS",
-    ElementType.FILE_UPLOAD:  "FILE_UPLOADS",
-    ElementType.TAB:          "TABS",
-    ElementType.FORM:         "FORMS",
-    ElementType.OTHER:        "OTHER",
+    ElementType.BUTTON:         "BUTTONS",
+    ElementType.INPUT_TEXT:     "INPUTS",
+    ElementType.INPUT_EMAIL:    "INPUTS",
+    ElementType.INPUT_TEL:      "INPUTS",
+    ElementType.INPUT_NUMBER:   "INPUTS",
+    ElementType.INPUT_SEARCH:   "INPUTS",
+    ElementType.INPUT_PASS:     "INPUTS",
+    ElementType.TEXTAREA:       "INPUTS",
+    ElementType.SELECT:         "INPUTS",
+    ElementType.CHECKBOX:       "FORMS",
+    ElementType.RADIO:          "FORMS",
+    ElementType.LINK:           "LINKS",
+    ElementType.FILE_UPLOAD:    "FILE_UPLOADS",
+    ElementType.TAB:            "TABS",
+    ElementType.FORM:           "FORMS",
+    ElementType.OTHER:          "OTHER",
     # ===== Sidebar Detection Enhancement START =====
-    ElementType.NAV_ITEM:     "SIDEBAR_NAV",
+    ElementType.NAV_ITEM:       "SIDEBAR_NAV",
     # ===== Sidebar Detection Enhancement END =====
+    # ===== DYNAMIC UI ELEMENTS START =====
+    ElementType.ACCORDION:      "ACCORDIONS",
+    ElementType.MODAL_TRIGGER:  "MODAL_TRIGGERS",
+    ElementType.CLICKABLE_CARD: "CARDS",
+    # ===== DYNAMIC UI ELEMENTS END =====
 }
+
 
 
 class Crawler:
@@ -115,7 +127,13 @@ class Crawler:
         self.visited: set[str]  = set()
         self.queue: deque[str]  = deque()
         self._base_domain       = urlparse(start_url).netloc
-        self.form_tester        = FormTester(page)
+        self._last_nav_response = None
+        # ── State tracker: crawl-wide dedup for ALL elements/routes/states ──
+        self.state_tracker      = StateTracker()
+        self.form_tester        = FormTester(page, state_tracker=self.state_tracker)
+        self.security_scanner   = SecurityScanner(page, run_id=metadata_logger.run_id, base_domain=self._base_domain)
+        if config.SECURITY_SCAN_ENABLED:
+            self.security_scanner.install_passive_hooks()
         run_id = metadata_logger.run_id
         self.manifest_exporter  = ElementManifestExporter(run_id)
         # START: Intelligent UI Analysis & Navigation Testing
@@ -123,6 +141,7 @@ class Crawler:
         # END: Intelligent UI Analysis & Navigation Testing
         # GLOBAL dedup: NAV_ITEMs (navbar/sidebar) are the SAME on every page.
         # Track their fingerprints crawl-wide so they are tested only ONCE.
+        # Also synced into state_tracker.tested_elements for unified dedup.
         self._global_nav_fingerprints: set = set()
 
     async def run(self) -> list[str]:
@@ -135,12 +154,14 @@ class Crawler:
             url = self.queue.popleft()
 
             if url in self.visited:
+                logger.debug("Skipping previously tested route: %s", url)
                 continue
             if len(self.visited) >= config.MAX_PAGES:
                 logger.warning("MAX_PAGES (%d) reached. Stopping crawler.", config.MAX_PAGES)
                 break
 
             self.visited.add(url)
+            self.state_tracker.mark_page_visited(url)   # sync route into StateTracker
             console.print_page_header(len(self.visited), url)
 
             await self._test_page(url)
@@ -150,6 +171,15 @@ class Crawler:
                 await self._safe_navigate(self.home_url)
 
         logger.info("Crawl complete. %d pages visited.", len(self.visited))
+        dedup_summary = self.state_tracker.summary()
+        logger.info(
+            "State tracker summary — pages: %d | elements tested: %d | "
+            "interactions: %d | UI states: %d",
+            dedup_summary["visited_pages"],
+            dedup_summary["tested_elements"],
+            dedup_summary["tested_interactions"],
+            dedup_summary["tested_states"],
+        )
 
         # Save element manifest
         manifest_path = self.manifest_exporter.save()
@@ -182,6 +212,21 @@ class Crawler:
 
         # Capture ACTUAL URL after redirects (e.g. http→https)
         canonical_url = self.page.url
+
+        if config.SECURITY_SCAN_ENABLED:
+            await self.security_scanner.scan_page(canonical_url, self._last_nav_response)
+            await self.security_scanner.run_safe_input_probes(canonical_url)
+            new_findings = self.security_scanner.export_new_findings()
+            for finding in new_findings:
+                if not finding.get("screenshot_path"):
+                    shot = await self.screenshot_manager.capture_error(
+                        page=self.page,
+                        url=canonical_url,
+                        action="security_scan",
+                        error_type=str(finding.get("category", "security_finding")),
+                    )
+                    finding["screenshot_path"] = shot
+            self.metadata_logger.log_security_findings(new_findings)
 
         await asyncio.sleep(0.5)  # allow JS to settle
 
@@ -228,6 +273,20 @@ class Crawler:
             logger.info("[Sidebar Detection] %d sidebar element(s) added to test set", len(sidebar_elements))
             elements = elements + sidebar_elements
         # ===== Sidebar Detection Enhancement END =====
+
+        # ===== DYNAMIC UI ELEMENTS START =====
+        # discover_dynamic_elements() finds ACCORDION / MODAL_TRIGGER / CLICKABLE_CARD
+        # elements using DYNAMIC_SELECTORS.  Shares the same _seen_handles dedup set
+        # so no element is counted twice.
+        dynamic_elements = await finder.discover_dynamic_elements(finder._seen_handles)
+        if dynamic_elements:
+            logger.info("[DynamicUI] %d dynamic element(s) added to test set", len(dynamic_elements))
+            elements = elements + dynamic_elements
+
+        # discover_shadow_dom_elements() logs shadow-root-hosted elements for inventory
+        # but does NOT add them to the interactive list (handles not accessible via Playwright).
+        await finder.discover_shadow_dom_elements(finder._seen_handles)
+        # ===== DYNAMIC UI ELEMENTS END =====
 
         # Record elements to manifest
         self.manifest_exporter.record_page(url, elements)
@@ -415,6 +474,11 @@ class Crawler:
                 continue
             # END: Sidebar Navigation Processing
 
+            # Skip ACCORDION — handled after main loop by _run_accordion_testing()
+            if elem.element_type in _ACCORDION_HANDLED:
+                idx += 1
+                continue
+
             # Build dedup key using structural fingerprint so it survives
             # page drift + back-navigation re-discovery cycles.
             # Falls back to (selector, label, type) for elements without fingerprints.
@@ -426,6 +490,22 @@ class Crawler:
                 idx += 1
                 continue
 
+            # ── GLOBAL dedup: skip elements already tested on a PREVIOUS page ──
+            if config.GLOBAL_ELEMENT_DEDUP and self.state_tracker.is_element_tested(elem_key):
+                logger.debug(
+                    "Skipping already tested element: [%s] %s",
+                    elem.element_type.name, elem.label,
+                )
+                console.print_action(
+                    True, elem.element_type.name, elem.label,
+                    "skipped_already_tested",
+                )
+                page_skipped += 1
+                processed.add(elem_key)   # keep local set coherent for drift-recovery filter
+                idx += 1
+                continue
+            # ── END global dedup ──────────────────────────────────────────────
+
             # Re-check for page drift from a PREVIOUS interaction
             current_url = self.page.url
             if self._normalize(current_url) != self._normalize(canonical_url):
@@ -436,13 +516,10 @@ class Crawler:
                 # Re-discover fresh handles BUT keep processed set intact.
                 # Filter out already-tested elements so we never re-test.
                 new_elements = await finder.discover()
-                element_list = [
-                    e for e in new_elements
-                    if (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
-                    not in processed
-                    and e.element_type not in _FORM_TESTER_HANDLED
-                    and e.element_type not in _SIDEBAR_HANDLED
-                ]
+                # ===== OPTIMIZATION START =====
+                # Element filter extracted to _filter_elements() — was copy-pasted 3×
+                element_list = self._filter_elements(new_elements, processed)
+                # ===== OPTIMIZATION END =====
                 current_section = ""   # reset section header only
                 idx = 0
                 continue
@@ -456,6 +533,9 @@ class Crawler:
             result = await self.interactor.interact(elem)
 
             processed.add(elem_key)
+            # Mark globally tested (crawl-wide) regardless of outcome
+            self.state_tracker.mark_element_tested(elem_key)
+            self.state_tracker.mark_interaction_tested(elem_key, elem.element_type.name)
             idx += 1
 
             # Stale element — skip cleanly
@@ -488,15 +568,23 @@ class Crawler:
                     if not success:
                         break
                     new_elements = await finder.discover()
-                    element_list = [
-                        e for e in new_elements
-                        if (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
-                        not in processed
-                        and e.element_type not in _FORM_TESTER_HANDLED
-                        and e.element_type not in _SIDEBAR_HANDLED
-                    ]
+                    # ===== OPTIMIZATION START =====
+                    element_list = self._filter_elements(new_elements, processed)
+                    # ===== OPTIMIZATION END =====
                     current_section = ""
                     idx = 0
+                else:
+                    # ── Modal detection: after a successful BUTTON click, check
+                    # whether a modal/dialog/drawer just opened and test it.
+                    if elem.element_type == ElementType.BUTTON:
+                        modal_stats = await self._detect_and_test_modal(
+                            canonical_url=canonical_url,
+                            depth=0,
+                            processed=processed,
+                        )
+                        page_passed  += modal_stats[0]
+                        page_failed  += modal_stats[1]
+                        page_skipped += modal_stats[2]
 
             else:
                 page_failed += 1
@@ -528,13 +616,9 @@ class Crawler:
                     if not success:
                         break
                     new_elements = await finder.discover()
-                    element_list = [
-                        e for e in new_elements
-                        if (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
-                        not in processed
-                        and e.element_type not in _FORM_TESTER_HANDLED
-                        and e.element_type not in _SIDEBAR_HANDLED
-                    ]
+                    # ===== OPTIMIZATION START =====
+                    element_list = self._filter_elements(new_elements, processed)
+                    # ===== OPTIMIZATION END =====
                     current_section = ""
                     idx = 0
 
@@ -566,6 +650,25 @@ class Crawler:
             logger.info("[Recursive] Current page fully tested: %s", url)
         # END: Intelligent Recursive Functional Testing
 
+        # ===== ACCORDION TESTING START =====
+        # Test accordion/collapsible elements LAST — they expand hidden content,
+        # which could otherwise interfere with form-field testing above.
+        accordion_elements = [e for e in elements if e.element_type in _ACCORDION_HANDLED]
+        if accordion_elements:
+            logger.info("[Accordion] %d accordion element(s) found. Running expand tests.",
+                        len(accordion_elements))
+            console.print_section_header("ACCORDIONS")
+            ac_passed, ac_failed, ac_skipped = await self._run_accordion_testing(
+                url=url,
+                canonical_url=canonical_url,
+                accordion_elements=accordion_elements,
+                processed=processed,
+            )
+            page_passed  += ac_passed
+            page_failed  += ac_failed
+            page_skipped += ac_skipped
+        # ===== ACCORDION TESTING END =====
+
         # ── Per-page summary ───────────────────────────────────────────────────
         console.print_page_summary(page_passed, page_failed, page_skipped)
 
@@ -580,6 +683,26 @@ class Crawler:
                     enqueued += 1
 
         console.print_links_enqueued(enqueued, len(self.queue))
+
+    # ===== OPTIMIZATION START =====
+    def _filter_elements(self, elements: list, processed: set) -> list:
+        """
+        Filter a freshly-discovered element list to only unprocessed, interactor-
+        loop-eligible elements.
+
+        Used after every drift-recovery re-discover() call.  Was previously an
+        identical 7-line list-comprehension copy-pasted 3 times in _test_page.
+        Extracting here ensures any future change is made in ONE place.
+        """
+        return [
+            e for e in elements
+            if (e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name))
+            not in processed
+            and e.element_type not in _FORM_TESTER_HANDLED
+            and e.element_type not in _SIDEBAR_HANDLED
+            and e.element_type not in _ACCORDION_HANDLED
+        ]
+    # ===== OPTIMIZATION END =====
 
     # START: Sidebar Navigation Processing
     async def _run_sidebar_navigation(
@@ -668,9 +791,12 @@ class Crawler:
                 continue
 
             # Mark processed immediately — regardless of outcome
-            # Also add to the crawl-wide nav set to prevent re-testing on other pages
+            # Also add to the crawl-wide nav set and StateTracker to prevent
+            # re-testing on other pages.
             processed.add(elem_key)
             self._global_nav_fingerprints.add(elem_key)
+            self.state_tracker.mark_element_tested(elem_key)
+            self.state_tracker.mark_interaction_tested(elem_key, elem.element_type.name)
 
             if result.action_performed.startswith("skipped_stale"):
                 logger.debug("[Sidebar] Stale sidebar element skipped: %s", label_str)
@@ -747,6 +873,7 @@ class Crawler:
         """Navigate with error handling. Returns True on success."""
         try:
             response = await self.page.goto(url, wait_until="domcontentloaded", timeout=config.NAV_TIMEOUT)
+            self._last_nav_response = response
             if response and response.status >= 400:
                 console.print_broken_link(url, f"HTTP {response.status}")
                 logger.warning("HTTP %d navigating to %s", response.status, url)
@@ -819,3 +946,141 @@ class Crawler:
         except Exception as exc:
             logger.debug("Broken page check failed: %s", exc)
         return False
+
+    async def _detect_and_test_modal(self, canonical_url: str, depth: int, processed: set) -> tuple[int, int, int]:
+        """Detect an open modal/dialog and test its interactive elements.
+
+        This method is deliberately conservative:
+        - Bounded by `config.MAX_MODAL_DEPTH` to avoid infinite recursion.
+        - Only interacts with newly discovered elements that are not in `processed`.
+        - Stops when the modal is no longer present or when navigation occurs.
+        Returns a (passed, failed, skipped) tuple.
+        """
+        passed = failed = skipped = 0
+
+        if depth >= config.MAX_MODAL_DEPTH:
+            logger.debug("Max modal depth reached (%d). Skipping modal tests.", config.MAX_MODAL_DEPTH)
+            return (0, 0, 0)
+
+        # ── Global modal state dedup ────────────────────────────────────────────
+        modal_state_key = self.state_tracker.build_state_key(
+            canonical_url, "modal", str(depth)
+        )
+        if self.state_tracker.is_state_tested(modal_state_key):
+            logger.debug(
+                "Skipping duplicate interaction: modal at '%s' depth=%d already tested",
+                canonical_url, depth,
+            )
+            return (0, 0, 0)
+        self.state_tracker.mark_state_tested(modal_state_key)
+        # ── END modal state dedup ───────────────────────────────────────────────
+
+        try:
+            modal_present = await self.page.evaluate(
+                """
+                () => !!Array.from(document.querySelectorAll('[role="dialog"], .modal, [aria-modal="true"]'))
+                """
+            )
+        except Exception:
+            modal_present = False
+
+        if not modal_present:
+            return (0, 0, 0)
+
+        logger.info("[Modal] Modal detected — running bounded modal element tests (depth=%d)", depth)
+
+        finder = ElementFinder(self.page)
+        try:
+            elements = await finder.discover()
+        except Exception as exc:
+            logger.debug("[Modal] Element discovery failed: %s", exc)
+            return (0, 0, 0)
+
+        # Filter to elements not yet processed and limit to a safe count
+        modal_elements = []
+        for e in elements:
+            key = e.fingerprint if e.fingerprint else (e.selector, e.label, e.element_type.name)
+            if key in processed:
+                continue
+            modal_elements.append(e)
+            if len(modal_elements) >= 20:
+                break
+
+        # Interact sequentially with modal elements (safe, non-destructive)
+        for elem in modal_elements:
+            key = elem.fingerprint if elem.fingerprint else (elem.selector, elem.label, elem.element_type.name)
+            try:
+                result = await self.interactor.interact(elem)
+            except Exception as exc:
+                logger.error("[Modal] Interaction exception on modal element %s: %s", elem.label, exc)
+                processed.add(key)
+                failed += 1
+                # If navigation occurred, stop testing
+                if self._normalize(self.page.url) != self._normalize(canonical_url):
+                    break
+                continue
+
+            processed.add(key)
+
+            if result.action_performed.startswith("skipped_stale"):
+                skipped += 1
+                self.metadata_logger.log_action(
+                    url=canonical_url, action=result.action_performed,
+                    element_label=result.element_label, element_type=result.element_type,
+                )
+                continue
+
+            if result.success:
+                passed += 1
+                self.metadata_logger.log_action(
+                    url=canonical_url, action=result.action_performed,
+                    element_label=result.element_label, element_type=result.element_type,
+                )
+            else:
+                failed += 1
+                ss = await self.screenshot_manager.capture_error(
+                    page=self.page, url=canonical_url, action=result.action_performed, error_type="modal_interaction_error"
+                )
+                self.metadata_logger.log_error(
+                    url=canonical_url, action=result.action_performed,
+                    error_type="modal_interaction_error",
+                    error_message=result.error_message, element_label=result.element_label,
+                    element_type=result.element_type, screenshot_path=ss,
+                )
+
+            # If the modal closed or navigation occurred, stop testing further modal elements
+            try:
+                still_modal = await self.page.evaluate(
+                    """
+                    () => !!Array.from(document.querySelectorAll('[role="dialog"], .modal, [aria-modal="true"]'))
+                    """
+                )
+            except Exception:
+                still_modal = False
+
+            if not still_modal or self._normalize(self.page.url) != self._normalize(canonical_url):
+                # If a nested modal opened, recurse one level deeper to test it
+                if self._normalize(self.page.url) == self._normalize(canonical_url):
+                    logger.debug("[Modal] Modal closed after interaction; ending modal pass.")
+                else:
+                    logger.debug("[Modal] Navigation detected during modal testing: %s", self.page.url)
+                break
+
+        # After interacting, if still in the same canonical page and modal still present,
+        # attempt one recursive pass (depth+1) to handle nested modals safely.
+        try:
+            still_modal = await self.page.evaluate(
+                """
+                () => !!Array.from(document.querySelectorAll('[role="dialog"], .modal, [aria-modal="true"]'))
+                """
+            )
+        except Exception:
+            still_modal = False
+
+        if still_modal and self._normalize(self.page.url) == self._normalize(canonical_url):
+            more = await self._detect_and_test_modal(canonical_url=canonical_url, depth=depth + 1, processed=processed)
+            passed += more[0]
+            failed += more[1]
+            skipped += more[2]
+
+        return (passed, failed, skipped)

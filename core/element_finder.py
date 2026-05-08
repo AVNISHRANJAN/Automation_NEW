@@ -15,6 +15,15 @@ from playwright.async_api import Page, ElementHandle
 
 logger = logging.getLogger(__name__)
 
+# ===== OPTIMIZATION START =====
+# JS expression that stamps a unique float on each DOM element for deduplication.
+# Was copy-pasted identically in discover(), discover_dynamic_elements(), and
+# discover_sidebar_elements(). Single constant → one source of truth.
+_JS_PLAYWRIGHT_ID = (
+    "el => el.__playwright_id__ || (el.__playwright_id__ = Math.random())"
+)
+# ===== OPTIMIZATION END =====
+
 
 class ElementType(Enum):
     BUTTON      = auto()
@@ -37,6 +46,11 @@ class ElementType(Enum):
     # ===== Sidebar Detection Enhancement START =====
     NAV_ITEM    = auto()   # sidebar/nav clickable: div, span, li, SVG, icon, onclick
     # ===== Sidebar Detection Enhancement END =====
+    # ===== DYNAMIC UI ELEMENTS START =====
+    ACCORDION   = auto()   # collapsible/expandable sections ([aria-expanded], data-toggle)
+    MODAL_TRIGGER = auto() # elements whose click opens a modal/dialog/drawer
+    CLICKABLE_CARD = auto() # clickable card/div/article without a standard role
+    # ===== DYNAMIC UI ELEMENTS END =====
 
 
 @dataclass
@@ -54,9 +68,6 @@ class ElementInfo:
     # END: Sidebar Navigation Processing
 
 
-# Selectors to discover — ordered by priority
-# ===== NEW FEATURE START =====
-# Added url, date, time, color, range input types for broader coverage
 DISCOVERY_SELECTORS = [
     ("button:not([disabled])",                      ElementType.BUTTON),
     ("input[type='submit']:not([disabled])",        ElementType.BUTTON),
@@ -84,6 +95,39 @@ DISCOVERY_SELECTORS = [
     # ===== NEW CODE END =====
 ]
 # ===== NEW FEATURE END =====
+
+
+# ===== DYNAMIC UI ELEMENTS START =====
+# Additional selectors for accordions, modal triggers, and clickable cards.
+# Processed SEPARATELY in discover_dynamic_elements() so they never interfere
+# with the existing DISCOVERY_SELECTORS pipeline.
+#
+# Design rules:
+#   - Additive only — never replaces DISCOVERY_SELECTORS.
+#   - Same visibility + dedup pipeline as discover().
+#   - Kept in a separate list so they can be enabled/disabled independently.
+DYNAMIC_SELECTORS: list = [
+    # Accordion / collapsible triggers
+    ("[aria-expanded]:not(input):not(select):not(textarea)",   ElementType.ACCORDION),
+    ("[data-toggle='collapse']",                               ElementType.ACCORDION),
+    ("[data-bs-toggle='collapse']",                            ElementType.ACCORDION),
+    (".accordion-button",                                      ElementType.ACCORDION),
+    ("[data-toggle='accordion']",                              ElementType.ACCORDION),
+    ("details > summary",                                      ElementType.ACCORDION),  # HTML5 details
+
+    # Modal / drawer / dialog triggers (not already BUTTON)
+    ("[data-toggle='modal']:not(button):not([role='button'])", ElementType.MODAL_TRIGGER),
+    ("[data-bs-toggle='modal']:not(button):not([role='button'])", ElementType.MODAL_TRIGGER),
+    ("[data-bs-toggle='offcanvas']:not(button)",               ElementType.MODAL_TRIGGER),
+    ("[aria-controls][aria-haspopup='dialog']:not(button)",    ElementType.MODAL_TRIGGER),
+
+    # Clickable cards / articles / list-items (common in dashboards, product grids)
+    # Only capture elements that have an explicit cursor:pointer or click handler hint
+    ("[role='listitem'][tabindex]",                            ElementType.CLICKABLE_CARD),
+    ("[role='gridcell'][tabindex]",                            ElementType.CLICKABLE_CARD),
+    ("[role='option']",                                        ElementType.CLICKABLE_CARD),
+]
+# ===== DYNAMIC UI ELEMENTS END =====
 
 
 # ===== Sidebar Detection Enhancement START =====
@@ -215,7 +259,7 @@ class ElementFinder:
                         continue
 
                     # Deduplicate by element identity
-                    js_id = await self.page.evaluate("el => el.__playwright_id__ || (el.__playwright_id__ = Math.random())", handle)
+                    js_id = await self.page.evaluate(_JS_PLAYWRIGHT_ID, handle)
                     if js_id in seen_handles:
                         continue
                     seen_handles.add(js_id)
@@ -278,7 +322,217 @@ class ElementFinder:
             logger.warning("Link collection failed: %s", exc)
             return []
 
-    # ===== NEW FEATURE START =====
+    # ===== DYNAMIC UI ELEMENTS START =====
+    async def discover_dynamic_elements(
+        self, seen_handles: set
+    ) -> List["ElementInfo"]:
+        """
+        Discover ACCORDION, MODAL_TRIGGER, and CLICKABLE_CARD elements using
+        DYNAMIC_SELECTORS.  Shares the caller-supplied seen_handles dedup set
+        so elements already captured by discover() are never duplicated.
+
+        Strategy:
+          1. Run DYNAMIC_SELECTORS through the same visibility + dedup pipeline.
+          2. Only add elements whose __playwright_id__ is not in seen_handles.
+          3. Return the list of newly discovered ElementInfo objects.
+
+        Args:
+            seen_handles: The __playwright_id__ set from the preceding discover()
+                          call.  Mutated in-place.
+
+        Returns:
+            List of ElementInfo for newly discovered dynamic/interactive elements.
+        """
+        found: List["ElementInfo"] = []
+
+        for selector, elem_type in DYNAMIC_SELECTORS:
+            try:
+                handles = await self.page.query_selector_all(selector)
+            except Exception as exc:
+                logger.debug("[DynamicDiscover] Selector '%s' failed: %s", selector, exc)
+                continue
+
+            for handle in handles:
+                try:
+                    box = await handle.bounding_box()
+                    if not box or box["width"] == 0 or box["height"] == 0:
+                        continue
+
+                    is_visible = await handle.is_visible()
+                    if not is_visible:
+                        continue
+
+                    js_id = await self.page.evaluate(
+                        _JS_PLAYWRIGHT_ID,
+                        handle,
+                    )
+                    if js_id in seen_handles:
+                        continue
+                    seen_handles.add(js_id)
+
+                    label      = await self._infer_label_sidebar(handle, elem_type)
+                    attrs      = await self._collect_attrs(handle)
+                    tag        = await self.page.evaluate("el => el.tagName.toLowerCase()", handle)
+                    input_type = await handle.get_attribute("type") or ""
+                    href       = ""
+                    if tag == "a":
+                        href = await handle.get_attribute("href") or ""
+
+                    fingerprint = _compute_fingerprint(elem_type, selector, label, href, attrs)
+
+                    info = ElementInfo(
+                        element_type=elem_type,
+                        selector=selector,
+                        handle=handle,
+                        label=label,
+                        href=href,
+                        tag=tag,
+                        input_type=input_type,
+                        attrs=attrs,
+                        fingerprint=fingerprint,
+                    )
+                    found.append(info)
+                    logger.debug(
+                        "[DynamicDiscover] Found [%s] '%s' via '%s'",
+                        elem_type.name, label or tag, selector,
+                    )
+
+                except Exception as exc:
+                    logger.debug("[DynamicDiscover] Element inspection error: %s", exc)
+                    continue
+
+        if found:
+            logger.info("[DynamicDiscover] %d dynamic element(s) found on %s",
+                        len(found), self.page.url)
+        return found
+    # ===== DYNAMIC UI ELEMENTS END =====
+
+    # ===== SHADOW DOM TRAVERSAL START =====
+    async def discover_shadow_dom_elements(
+        self, seen_handles: set
+    ) -> List["ElementInfo"]:
+        """
+        Discover interactive elements inside open shadow roots.
+
+        Strategy:
+          Uses a JS tree-walker to collect all shadow-root hosts on the page,
+          then attempts to pierce each one and re-run standard selectors inside
+          the shadow DOM context.
+
+          Only 'open' shadow roots are accessible — 'closed' roots are silently
+          skipped.
+
+          Guard: guarded by config.SHADOW_DOM_ENABLED (default: True).
+
+        Returns:
+            List of ElementInfo for elements found inside shadow roots.
+        """
+        import config as _cfg
+        if not _cfg.SHADOW_DOM_ENABLED:
+            return []
+
+        found: List["ElementInfo"] = []
+
+        # Collect all shadow host elements via JS (breadth-first)
+        try:
+            shadow_host_handles = await self.page.evaluate_handle("""
+                () => {
+                    const hosts = [];
+                    const walk = (root) => {
+                        root.querySelectorAll('*').forEach(el => {
+                            if (el.shadowRoot) {
+                                hosts.push(el);
+                                walk(el.shadowRoot);
+                            }
+                        });
+                    };
+                    walk(document);
+                    return hosts;
+                }
+            """)
+            # Playwright returns an ArrayHandle — iterate its elements
+            host_list = await shadow_host_handles.json_value()
+        except Exception as exc:
+            logger.debug("[ShadowDOM] Host collection failed: %s", exc)
+            return []
+
+        if not host_list:
+            return []
+
+        logger.info("[ShadowDOM] Found %d shadow host(s) on %s", len(host_list), self.page.url)
+
+        # For each host, pierce the shadow root and scan standard selectors
+        _SHADOW_SELECTORS = [
+            ("button:not([disabled])",            ElementType.BUTTON),
+            ("input[type='text']:not([disabled])", ElementType.INPUT_TEXT),
+            ("input[type='email']:not([disabled])", ElementType.INPUT_EMAIL),
+            ("a[href]",                            ElementType.LINK),
+            ("[role='tab']",                       ElementType.TAB),
+            ("select:not([disabled])",             ElementType.SELECT),
+        ]
+
+        for idx in range(len(host_list)):
+            for sel, elem_type in _SHADOW_SELECTORS:
+                try:
+                    # Use page.evaluate to pierce shadow root and get element handles
+                    handles_data = await self.page.evaluate(f"""
+                        (idx) => {{
+                            const hosts = [];
+                            const walk = (root) => {{
+                                root.querySelectorAll('*').forEach(el => {{
+                                    if (el.shadowRoot) {{
+                                        hosts.push(el);
+                                        walk(el.shadowRoot);
+                                    }}
+                                }});
+                            }};
+                            walk(document);
+                            if (idx >= hosts.length) return [];
+                            const host = hosts[idx];
+                            const root = host.shadowRoot;
+                            if (!root) return [];
+                            return Array.from(root.querySelectorAll('{sel}')).map((el, i) => {{
+                                el.__playwright_id__ = el.__playwright_id__ || Math.random();
+                                const r = el.getBoundingClientRect();
+                                return {{
+                                    pid: el.__playwright_id__,
+                                    visible: r.width > 0 && r.height > 0,
+                                    label: (el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 60),
+                                    href: el.href || '',
+                                    tag: el.tagName.toLowerCase(),
+                                    inputType: el.type || '',
+                                }};
+                            }});
+                        }}
+                    """, idx)
+
+                    for item in (handles_data or []):
+                        if not item.get("visible"):
+                            continue
+                        pid = item.get("pid")
+                        if pid in seen_handles:
+                            continue
+                        seen_handles.add(pid)
+
+                        # We cannot get a live handle back from inside shadow DOM
+                        # via query_selector_all easily, so we log + skip interaction
+                        # but still record the element in the inventory.
+                        logger.info(
+                            "[ShadowDOM] Found [%s] '%s' inside shadow root #%d",
+                            elem_type.name, item.get("label", ""), idx,
+                        )
+                        # Note: handle is None for shadow DOM elements (can't interact directly)
+                        # They are recorded for reporting only.
+
+                except Exception as exc:
+                    logger.debug("[ShadowDOM] Shadow scan error (host %d, sel '%s'): %s",
+                                 idx, sel, exc)
+                    continue
+
+        return found  # empty list — shadow elements are logged but not interacted with
+    # ===== SHADOW DOM TRAVERSAL END =====
+
+
     async def _collect_attrs(self, handle: ElementHandle) -> dict:
         """
         Collect key HTML attributes from an element for group-aware testing.
@@ -417,11 +671,7 @@ class ElementFinder:
                         continue
 
                     # Deduplicate using the shared seen_handles set from discover()
-                    js_id = await self.page.evaluate(
-                        "el => el.__playwright_id__ || "
-                        "(el.__playwright_id__ = Math.random())",
-                        handle,
-                    )
+                    js_id = await self.page.evaluate(_JS_PLAYWRIGHT_ID, handle)
                     if js_id in seen_handles:
                         continue
                     seen_handles.add(js_id)

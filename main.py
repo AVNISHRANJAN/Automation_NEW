@@ -176,7 +176,8 @@ async def main() -> None:
         all_records  = metadata_logger.get_all_records()
         errors       = metadata_logger.get_errors()
         successes    = metadata_logger.get_successes()
-        report_path  = report_builder.build(all_records, visited_pages)
+        security_findings = metadata_logger.get_security_findings()
+        report_path  = report_builder.build(all_records, visited_pages, security_findings)
         excel_path   = excel_reporter.build(all_records, visited_pages)
 
         # Count screenshots captured
@@ -194,6 +195,7 @@ async def main() -> None:
             screenshot_dir=str(ss_dir),
             excel_path=excel_path,
             inventory_path=crawler.ui_inventory.saved_path,
+            security_findings=len(security_findings),
         )
 
 

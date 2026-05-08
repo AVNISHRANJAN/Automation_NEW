@@ -38,7 +38,7 @@ class ReportBuilder:
         report_dir.mkdir(parents=True, exist_ok=True)
         self.report_path = report_dir / f"{run_id}.html"
 
-    def build(self, records: list, visited_pages: list) -> str:
+    def build(self, records: list, visited_pages: list, security_findings: list | None = None) -> str:
         """
         Generate the HTML report and write it to disk.
         Returns the file path as a string.
@@ -47,6 +47,7 @@ class ReportBuilder:
         n_pass   = len(records) - len(errors)
         n_fail   = len(errors)
         now      = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        security_findings = security_findings or []
 
         # ── Build rows ────────────────────────────────────────────────────────
         rows_html = ""
@@ -73,6 +74,21 @@ class ReportBuilder:
             f"<li><a href='{html.escape(p)}' target='_blank'>{html.escape(p)}</a></li>"
             for p in visited_pages
         )
+
+        sec_rows = ""
+        for f in security_findings:
+            sev = html.escape(str(f.get("severity", "LOW")))
+            conf = html.escape(str(f.get("confidence", "LOW")))
+            sec_rows += f"""
+            <tr>
+                <td><code>{sev}</code></td>
+                <td><code>{conf}</code></td>
+                <td>{html.escape(str(f.get("route", ""))[:70])}</td>
+                <td>{html.escape(str(f.get("title", ""))[:80])}</td>
+                <td>{html.escape(str(f.get("evidence", ""))[:180])}</td>
+                <td>{html.escape(str(f.get("reproduction_steps", ""))[:120])}</td>
+                <td>{html.escape(str(f.get("remediation", ""))[:120])}</td>
+            </tr>"""
 
         # ── Full HTML ─────────────────────────────────────────────────────────
         report_html = f"""<!DOCTYPE html>
@@ -208,6 +224,10 @@ class ReportBuilder:
       <div class="val">{n_fail}</div>
       <div class="lbl">Failed</div>
     </div>
+    <div class="card blue">
+      <div class="val">{len(security_findings)}</div>
+      <div class="lbl">Security Findings</div>
+    </div>
   </div>
 
   <h2>📋 Action Log</h2>
@@ -229,6 +249,24 @@ class ReportBuilder:
 
   <h2>🌐 Pages Visited ({len(visited_pages)})</h2>
   <ul>{pages_html}</ul>
+
+  <h2>🛡️ Security Findings ({len(security_findings)})</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Severity</th>
+        <th>Confidence</th>
+        <th>Route</th>
+        <th>Finding</th>
+        <th>Evidence</th>
+        <th>Repro</th>
+        <th>Remediation</th>
+      </tr>
+    </thead>
+    <tbody>
+      {sec_rows if sec_rows else '<tr><td colspan=\"7\">No security findings detected.</td></tr>'}
+    </tbody>
+  </table>
 
 </body>
 </html>
