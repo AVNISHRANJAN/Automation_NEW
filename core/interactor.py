@@ -368,8 +368,8 @@ class Interactor:
         is_multiple = await info.handle.get_attribute("multiple") is not None
         upload_type = "multi-file" if is_multiple else "single-file"
 
-        print(f"\n  📂 Waiting for manual file upload ({upload_type}): '{info.label}'")
-        print(f"     Please select a file in the browser dialog window.")
+        print("\n  📂 Waiting for manual file upload (" + upload_type + "): '" + info.label + "'")
+        print("     Please select a file in the browser dialog window.")
         logger.info("Waiting for manual file upload on '%s' (%s)", info.label, upload_type)
 
         try:

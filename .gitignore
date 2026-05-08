@@ -21,3 +21,9 @@ playwright/.local-browsers/
 # OS
 .DS_Store
 Thumbs.db
+venv/
+.venv/
+__pycache__/
+.pytest_cache/
+playwright-report/
+test-results/

@@ -36,7 +36,7 @@ class ReportBuilder:
         self.target_url = target_url
         report_dir = config.OUTPUT_DIR / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
-        self.report_path = report_dir / f"{run_id}.html"
+        self.report_path = report_dir / (run_id + ".html")
 
     def build(self, records: list, visited_pages: list, security_findings: list | None = None) -> str:
         """
@@ -57,58 +57,59 @@ class ReportBuilder:
             screenshot  = ""
             if not r.success and r.screenshot_path:
                 rel = html.escape(r.screenshot_path)
-                screenshot = f'<br><a href="file://{rel}" target="_blank">📸 screenshot</a>'
+                screenshot = "<br><a href='file://" + rel + "' target='_blank'>screenshot</a>"
 
-            err_msg = html.escape(r.error_message[:120]) if r.error_message else "—"
-            rows_html += f"""
-            <tr class="{status_cls}">
-                <td class="status-cell">{status_icon}</td>
-                <td>{html.escape(r.url[:60])}</td>
-                <td><code>{html.escape(r.element_type)}</code></td>
-                <td>{html.escape(r.element_label[:60])}</td>
-                <td>{html.escape(r.action[:80])}</td>
-                <td>{err_msg}{screenshot}</td>
-            </tr>"""
+            err_msg = html.escape(r.error_message[:120]) if r.error_message else "-"
+            rows_html += (
+                "<tr class='" + status_cls + "'>" +
+                "<td class='status-cell'>" + status_icon + "</td>" +
+                "<td>" + html.escape(r.url[:60]) + "</td>" +
+                "<td><code>" + html.escape(r.element_type) + "</code></td>" +
+                "<td>" + html.escape(r.element_label[:60]) + "</td>" +
+                "<td>" + html.escape(r.action[:80]) + "</td>" +
+                "<td>" + err_msg + screenshot + "</td>" +
+                "</tr>"
+            )
 
         # ── Visited pages list ────────────────────────────────────────────────
-        pages_html = "".join(
-            f"<li><a href='{html.escape(p)}' target='_blank'>{html.escape(p)}</a></li>"
-            for p in visited_pages
-        )
+        pages_html = ""
+        for p in visited_pages:
+            ep = html.escape(p)
+            pages_html += "<li><a href='" + ep + "' target='_blank'>" + ep + "</a></li>"
 
         sec_rows = ""
         for f in security_findings:
             sev = html.escape(str(f.get("severity", "LOW")))
             conf = html.escape(str(f.get("confidence", "LOW")))
-            sec_rows += f"""
-            <tr>
-                <td><code>{sev}</code></td>
-                <td><code>{conf}</code></td>
-                <td>{html.escape(str(f.get("route", ""))[:70])}</td>
-                <td>{html.escape(str(f.get("title", ""))[:80])}</td>
-                <td>{html.escape(str(f.get("evidence", ""))[:180])}</td>
-                <td>{html.escape(str(f.get("reproduction_steps", ""))[:120])}</td>
-                <td>{html.escape(str(f.get("remediation", ""))[:120])}</td>
-            </tr>"""
+            sec_rows += (
+                "<tr>" +
+                "<td><code>" + sev + "</code></td>" +
+                "<td><code>" + conf + "</code></td>" +
+                "<td>" + html.escape(str(f.get("route", ""))[:70]) + "</td>" +
+                "<td>" + html.escape(str(f.get("title", ""))[:80]) + "</td>" +
+                "<td>" + html.escape(str(f.get("evidence", ""))[:180]) + "</td>" +
+                "<td>" + html.escape(str(f.get("reproduction_steps", ""))[:120]) + "</td>" +
+                "<td>" + html.escape(str(f.get("remediation", ""))[:120]) + "</td>" +
+                "</tr>"
+            )
 
-        no_sec_findings = '<tr><td colspan="7">No security findings detected.</td></tr>'
-        sec_findings_table_body = sec_rows if sec_rows else no_sec_findings
+        sec_findings_table_body = sec_rows if sec_rows else "<tr><td colspan='7'>No security findings detected.</td></tr>"
         
         escaped_run_id = html.escape(self.run_id)
         escaped_target_url = html.escape(self.target_url)
-        n_pages = len(visited_pages)
-        n_actions = len(records)
-        n_sec_findings = len(security_findings)
+        n_pages = str(len(visited_pages))
+        n_actions = str(len(records))
+        n_sec_findings = str(len(security_findings))
 
         # ── Full HTML ─────────────────────────────────────────────────────────
-        report_html = f"""<!DOCTYPE html>
+        template = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Web Auto Tester — {escaped_run_id}</title>
+  <title>Web Auto Tester - {RUN_ID}</title>
   <style>
-    :root {{
+    :root {
       --bg:       #0f1117;
       --surface:  #1a1d27;
       --border:   #2e3148;
@@ -118,66 +119,66 @@ class ReportBuilder:
       --red:      #ef4444;
       --accent:   #6366f1;
       --code-bg:  #1e2235;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
       background: var(--bg);
       color: var(--text);
       font-family: 'Segoe UI', system-ui, sans-serif;
       font-size: 14px;
       line-height: 1.6;
       padding: 2rem;
-    }}
-    header {{
+    }
+    header {
       margin-bottom: 2rem;
       border-bottom: 1px solid var(--border);
       padding-bottom: 1.5rem;
-    }}
-    header h1 {{
+    }
+    header h1 {
       font-size: 1.8rem;
       font-weight: 700;
       color: var(--accent);
       margin-bottom: 0.4rem;
-    }}
-    header .meta {{ color: var(--muted); font-size: 0.85rem; }}
-    .summary {{
+    }
+    header .meta { color: var(--muted); font-size: 0.85rem; }
+    .summary {
       display: flex;
       gap: 1.5rem;
       margin-bottom: 2rem;
       flex-wrap: wrap;
-    }}
-    .card {{
+    }
+    .card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 1.2rem 1.8rem;
       min-width: 140px;
-    }}
-    .card .val {{
+    }
+    .card .val {
       font-size: 2rem;
       font-weight: 700;
       line-height: 1;
-    }}
-    .card .lbl {{ color: var(--muted); font-size: 0.8rem; margin-top: 4px; }}
-    .card.green .val {{ color: var(--green); }}
-    .card.red   .val {{ color: var(--red); }}
-    .card.blue  .val {{ color: var(--accent); }}
-    h2 {{
+    }
+    .card .lbl { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
+    .card.green .val { color: var(--green); }
+    .card.red   .val { color: var(--red); }
+    .card.blue  .val { color: var(--accent); }
+    h2 {
       font-size: 1.1rem;
       font-weight: 600;
       margin: 1.5rem 0 0.8rem;
       color: var(--text);
-    }}
-    table {{
+    }
+    table {
       width: 100%;
       border-collapse: collapse;
       background: var(--surface);
       border-radius: 12px;
       overflow: hidden;
       border: 1px solid var(--border);
-    }}
-    thead tr {{ background: #1f2337; }}
-    th {{
+    }
+    thead tr { background: #1f2337; }
+    th {
       text-align: left;
       padding: 0.6rem 1rem;
       color: var(--muted);
@@ -185,62 +186,62 @@ class ReportBuilder:
       font-size: 0.8rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-    }}
-    td {{
+    }
+    td {
       padding: 0.55rem 1rem;
       border-top: 1px solid var(--border);
       vertical-align: top;
       word-break: break-word;
       max-width: 250px;
-    }}
-    tr.pass .status-cell {{ color: var(--green); font-weight: 700; }}
-    tr.fail .status-cell {{ color: var(--red);   font-weight: 700; }}
-    tr.fail {{ background: rgba(239,68,68,0.05); }}
-    code {{
+    }
+    tr.pass .status-cell { color: var(--green); font-weight: 700; }
+    tr.fail .status-cell { color: var(--red);   font-weight: 700; }
+    tr.fail { background: rgba(239,68,68,0.05); }
+    code {
       background: var(--code-bg);
       padding: 2px 6px;
       border-radius: 4px;
       font-size: 0.8rem;
-    }}
-    a {{ color: var(--accent); }}
-    ul {{ padding-left: 1.2rem; color: var(--muted); font-size: 0.85rem; }}
-    ul li {{ margin: 3px 0; }}
+    }
+    a { color: var(--accent); }
+    ul { padding-left: 1.2rem; color: var(--muted); font-size: 0.85rem; }
+    ul li { margin: 3px 0; }
   </style>
 </head>
 <body>
   <header>
-    <h1>🤖 Web Auto Tester Report</h1>
+    <h1>Web Auto Tester Report</h1>
     <div class="meta">
-      Run ID: <strong>{escaped_run_id}</strong> &nbsp;|&nbsp;
-      Target: <strong><a href="{escaped_target_url}" target="_blank">{escaped_target_url}</a></strong> &nbsp;|&nbsp;
-      Generated: {now}
+      Run ID: <strong>{RUN_ID}</strong> |
+      Target: <strong><a href="{TARGET_URL}" target="_blank">{TARGET_URL}</a></strong> |
+      Generated: {NOW}
     </div>
   </header>
 
   <div class="summary">
     <div class="card blue">
-      <div class="val">{n_pages}</div>
+      <div class="val">{N_PAGES}</div>
       <div class="lbl">Pages Tested</div>
     </div>
     <div class="card blue">
-      <div class="val">{n_actions}</div>
+      <div class="val">{N_ACTIONS}</div>
       <div class="lbl">Actions Logged</div>
     </div>
     <div class="card green">
-      <div class="val">{n_pass}</div>
+      <div class="val">{N_PASS}</div>
       <div class="lbl">Passed</div>
     </div>
     <div class="card red">
-      <div class="val">{n_fail}</div>
+      <div class="val">{N_FAIL}</div>
       <div class="lbl">Failed</div>
     </div>
     <div class="card blue">
-      <div class="val">{n_sec_findings}</div>
+      <div class="val">{N_SEC}</div>
       <div class="lbl">Security Findings</div>
     </div>
   </div>
 
-  <h2>📋 Action Log</h2>
+  <h2>Action Log</h2>
   <table>
     <thead>
       <tr>
@@ -253,14 +254,14 @@ class ReportBuilder:
       </tr>
     </thead>
     <tbody>
-      {rows_html}
+      {ROWS_HTML}
     </tbody>
   </table>
 
-  <h2>🌐 Pages Visited ({n_pages})</h2>
-  <ul>{pages_html}</ul>
+  <h2>Pages Visited ({N_PAGES})</h2>
+  <ul>{PAGES_HTML}</ul>
 
-  <h2>🛡️ Security Findings ({n_sec_findings})</h2>
+  <h2>Security Findings ({N_SEC})</h2>
   <table>
     <thead>
       <tr>
@@ -274,13 +275,25 @@ class ReportBuilder:
       </tr>
     </thead>
     <tbody>
-      {sec_findings_table_body}
+      {SEC_ROWS}
     </tbody>
   </table>
 
 </body>
 </html>
 """
+        report_html = template.replace("{RUN_ID}", escaped_run_id)
+        report_html = report_html.replace("{TARGET_URL}", escaped_target_url)
+        report_html = report_html.replace("{NOW}", now)
+        report_html = report_html.replace("{N_PAGES}", n_pages)
+        report_html = report_html.replace("{N_ACTIONS}", n_actions)
+        report_html = report_html.replace("{N_PASS}", str(n_pass))
+        report_html = report_html.replace("{N_FAIL}", str(n_fail))
+        report_html = report_html.replace("{N_SEC}", n_sec_findings)
+        report_html = report_html.replace("{ROWS_HTML}", rows_html)
+        report_html = report_html.replace("{PAGES_HTML}", pages_html)
+        report_html = report_html.replace("{SEC_ROWS}", sec_findings_table_body)
+
         try:
             self.report_path.write_text(report_html, encoding="utf-8")
             logger.info("Report written: %s", self.report_path)

@@ -1,26 +1,11 @@
 """
-reporting/console.py — Structured, coloured terminal output for Web Auto Tester.
-
-Design principles:
-  - ZERO external dependencies (stdlib ANSI only).
-  - All user-visible terminal output goes through this module.
-  - logger.* calls are for FILE logs only; this module owns the terminal.
-  - Keep functions small, single-purpose, and easy to mock in tests.
-
-Colour palette:
-  CYAN    → section headers, page headers
-  GREEN   → pass / success
-  RED     → fail / error
-  YELLOW  → warnings / skipped
-  MAGENTA → element type badges
-  WHITE   → neutral data
-  DIM     → separators, tree branches
+reporting/console.py — Professional CLI output for the Web Auto Tester.
 """
 
+import os
 import sys
-from typing import List, Dict
 
-# ── ANSI colour codes ──────────────────────────────────────────────────────────
+# ── ANSI Colour Constants ──────────────────────────────────────────────────
 _RESET  = "\033[0m"
 _BOLD   = "\033[1m"
 _DIM    = "\033[2m"
@@ -33,260 +18,157 @@ _MAGENTA= "\033[35m"
 _BLUE   = "\033[34m"
 _WHITE  = "\033[97m"
 
-# Disable colours when not writing to a real terminal (CI, file redirect, etc.)
-_USE_COLOR = sys.stdout.isatty()
+_W = 76  # Line width
+
+def _c(color, text):
+    return color + str(text) + _RESET
+
+def _bold(text):
+    return _BOLD + str(text) + _RESET
+
+def _dim(text):
+    return _DIM + str(text) + _RESET
 
 
-def _c(color: str, text: str) -> str:
-    """Wrap text in a colour code, or return plain text if no TTY."""
-    if not _USE_COLOR:
-        return text
-    return f"{color}{text}{_RESET}"
+def print_banner(target_url, run_id, headless, max_pages):
+    print("")
+    print("=" * _W)
+    print(_c(_CYAN + _BOLD, "  WEB AUTO TESTER".center(_W - 4)))
+    print("=" * _W)
+    print("  " + _c(_BLUE, "Target URL") + " : " + _bold(target_url))
+    print("  " + _c(_BLUE, "Run ID    ") + " : " + str(run_id))
+    print("  " + _c(_BLUE, "Headless  ") + " : " + str(headless))
+    print("  " + _c(_BLUE, "Max Pages ") + " : " + str(max_pages))
+    print("-" * _W)
 
 
-def _bold(text: str) -> str:
-    return _c(_BOLD, text)
+def print_page_header(page_num, url):
+    print("")
+    label = _c(_CYAN + _BOLD, "[" + str(page_num) + "] Testing:")
+    print("  " + label)
+    print("  " + _c(_WHITE, url))
 
 
-def _dim(text: str) -> str:
-    return _c(_DIM, text)
+def print_discovery_summary(total):
+    print("  " + _c(_BLUE, "Elements Found") + " : " + _bold(str(total)))
 
 
-# ── Width constant ─────────────────────────────────────────────────────────────
-_W = 60   # separator width
+def print_section(section):
+    print("")
+    print("  " + _c(_MAGENTA + _BOLD, section))
 
 
-def _sep(char: str = "═") -> str:
-    return _c(_DIM, char * _W)
-
-
-def _thin_sep() -> str:
-    return _c(_DIM, "─" * _W)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PUBLIC API
-# ══════════════════════════════════════════════════════════════════════════════
-
-def print_banner(target_url: str, run_id: str, headless: bool, max_pages: int) -> None:
-    """Print the startup banner."""
-    print()
-    print(_sep())
-    print(_c(_CYAN + _BOLD, f"  {'WEB AUTO TESTER':^{_W - 4}}"))
-    print(_sep())
-    print(f"  {_c(_BLUE, 'Target URL')} : {_bold(target_url)}")
-    print(f"  {_c(_BLUE, 'Run ID    ')} : {run_id}")
-    print(f"  {_c(_BLUE, 'Headless  ')} : {headless}")
-    print(f"  {_c(_BLUE, 'Max Pages ')} : {max_pages}")
-    print(_sep())
-    print()
-
-
-def print_page_header(page_num: int, url: str) -> None:
-    """Print the header for each page being tested."""
-    print()
-    print(_thin_sep())
-    label = _c(_CYAN + _BOLD, f"[{page_num}] Testing:")
-    print(f"  {label}")
-    print(f"  {_c(_WHITE, url)}")
-    print()
-
-
-def print_element_count(total: int) -> None:
-    """Print total elements discovered on a page."""
-    print(f"  {_c(_BLUE, 'Elements Found')} : {_bold(str(total))}")
-    print()
-
-
-def print_section_header(section: str) -> None:
-    """
-    Print a section header like:
-      FORMS
-    """
-    print(f"  {_c(_MAGENTA + _BOLD, section)}")
-
-
-def print_section_summary(items: List[tuple]) -> None:
-    """
-    Print a tree-style section summary.
-    items: list of (label, count, passed) tuples
-    Example:
-      ├── Checkboxes : 13 ✓
-      └── Inputs     : 14 ✓
-    """
-    for i, (label, count, passed) in enumerate(items):
-        is_last  = i == len(items) - 1
-        branch   = _dim("└──") if is_last else _dim("├──")
-        icon     = _c(_GREEN, "✓") if passed else _c(_RED, "✗")
-        padded   = f"{label:<12}"
-        print(f"  {branch} {padded} : {count} {icon}")
-    print()
-
-
-def print_action(success: bool, elem_type: str, label: str, action: str) -> None:
-    """
-    Print a single element interaction result.
-      ✓  [BUTTON] Submit → click
-      ✗  [INPUT_TEXT] Username → ERROR captured
-      ~  [RADIO] Option A → skipped (stale handle)
-    """
-    label   = label[:50]
-    action  = action[:55]
-
-    if action.startswith("skipped"):
-        icon     = _c(_YELLOW, "~")
-        type_str = _c(_YELLOW, f"[{elem_type}]")
-        act_str  = _dim(action)
-    elif success:
-        icon     = _c(_GREEN, "✓")
-        type_str = _c(_GREEN, f"[{elem_type}]")
-        act_str  = action
-    else:
-        icon     = _c(_RED, "✗")
-        type_str = _c(_RED, f"[{elem_type}]")
-        act_str  = _c(_RED, action)
-
-    print(f"    {icon}  {type_str} {label} {_dim('→')} {act_str}")
-
-
-def print_form_group_result(
-    success: bool,
-    group_type: str,   # "CHECKBOX_GROUP" or "RADIO_GROUP"
-    group_name: str,
-    label: str,
-    action: str,
-) -> None:
-    """Print a form group test result (checkbox/radio)."""
-    label  = label[:40]
+def print_interaction_row(elem_type, label, action, success, reason=None, is_last=False):
+    branch = "└──" if is_last else "├──"
     icon   = _c(_GREEN, "✓") if success else _c(_RED, "✗")
-    color  = _GREEN if success else _RED
-    badge  = _c(color, f"[{group_type}:{group_name}]")
-    print(f"    {icon}  {badge} {label} {_dim('→')} {action}")
+    
+    if success:
+        type_str = _c(_GREEN, "[" + str(elem_type) + "]")
+    else:
+        type_str = _c(_RED, "[" + str(elem_type) + "]")
+        
+    act_str = str(action)
+    if reason:
+        act_str += _dim(" (" + str(reason) + ")")
+        
+    print("    " + icon + "  " + type_str + " " + str(label) + " " + _dim("→") + " " + act_str)
 
 
-def print_broken_link(url: str, reason: str = "") -> None:
-    """Print a broken link warning line."""
-    suffix = _dim(f" ({reason})") if reason else ""
-    print(f"  {_c(_RED, '✗')} {_c(_RED, 'Broken link')} : {url}{suffix}")
+def print_group_row(group_type, group_name, label, action, success, is_last=False):
+    branch = "└──" if is_last else "├──"
+    icon   = _c(_GREEN, "✓") if success else _c(_RED, "✗")
+    color  = _MAGENTA if success else _RED
+    
+    badge  = _c(color, "[" + str(group_type) + ":" + str(group_name) + "]")
+    print("    " + icon + "  " + badge + " " + str(label) + " " + _dim("→") + " " + str(action))
 
 
-def print_iframe_found(count: int) -> None:
-    """Print iframe element discovery notice."""
-    print(f"  {_dim('→')} {count} element(s) found in iframes")
+def print_broken_link(url, reason=None):
+    suffix = _dim(" (" + str(reason) + ")") if reason else ""
+    print("  " + _c(_RED, "✗") + " " + _c(_RED, "Broken link") + " : " + str(url) + suffix)
 
 
-def print_links_enqueued(enqueued: int, queue_size: int) -> None:
-    """Print crawl queue status after a page completes."""
-    print(f"  {_dim('→')} {enqueued} new URL(s) queued  "
-          f"{_dim(f'({queue_size} total in queue)')}")
+def print_iframe_discovery(count):
+    print("  " + _dim("→") + " " + str(count) + " element(s) found in iframes")
 
 
-def print_page_summary(passed: int, failed: int, skipped: int) -> None:
-    """Print a compact per-page pass/fail/skip summary."""
-    print()
-    g = _c(_GREEN, f"{passed} passed")
-    r = _c(_RED,   f"{failed} failed") if failed else _dim("0 failed")
-    y = _c(_YELLOW, f"{skipped} skipped") if skipped else _dim("0 skipped")
-    print(f"  {_dim('Summary:')}  {g}  ·  {r}  ·  {y}")
+def print_queue_update(enqueued, queue_size):
+    print("  " + _dim("→") + " " + str(enqueued) + " new URL(s) queued  " +
+          _dim("(" + str(queue_size) + " total in queue)"))
 
 
-def print_error_block(errors: List[dict]) -> None:
-    """
-    Print a compact ERRORS section at the bottom of a page.
-    errors: list of {'label': str, 'action': str, 'message': str}
-    """
-    if not errors:
-        return
-    print()
-    print_section_header("ERRORS")
-    for i, e in enumerate(errors):
-        is_last = i == len(errors) - 1
-        branch  = _dim("└──") if is_last else _dim("├──")
-        label   = e.get("label", "?")[:40]
-        msg     = e.get("message", "")[:60]
-        print(f"  {branch} {_c(_RED, label)} {_dim('→')} {msg}")
-    print()
+def print_page_summary(passed, failed, skipped):
+    g = _c(_GREEN, str(passed) + " passed")
+    r = _c(_RED,   str(failed) + " failed") if failed else _dim("0 failed")
+    y = _c(_YELLOW, str(skipped) + " skipped") if skipped else _dim("0 skipped")
+    print("  " + _dim("Summary:") + "  " + g + "  ·  " + r + "  ·  " + y)
 
 
-def print_manifest_saved(path: str, pages: int, elements: int) -> None:
-    """Print manifest save confirmation."""
-    print(f"\n  {_c(_GREEN, '[✓]')} Element manifest saved")
-    print(f"      {_dim(path)}")
-    print(f"      Covers {pages} page(s), {elements} element(s)")
+def print_error(label, msg, is_last=False):
+    branch = "└──" if is_last else "├──"
+    print("  " + branch + " " + _c(_RED, label) + " " + _dim("→") + " " + str(msg))
 
 
-def print_crawl_complete(total_pages: int) -> None:
-    """Print hyperlink test completion banner."""
-    print()
-    print(_sep())
-    print(f"  {_c(_GREEN, '✓')}  All hyperlinks tested  ·  "
-          f"{_bold(str(total_pages))} unique page(s) visited")
-    print(_sep())
-    print()
+def print_inventory_saved(path, pages, elements):
+    print("")
+    print("  " + _c(_GREEN, "[✓]") + " Element manifest saved")
+    print("      " + _dim(path))
+    print("      Covers " + str(pages) + " page(s), " + str(elements) + " element(s)")
 
 
-def print_final_summary(
-    pages: int,
-    total_elements: int,
-    passed: int,
-    failed: int,
-    screenshots: int,
-    report_path: str,
-    screenshot_dir: str,
-    excel_path: str = "",
-    inventory_path: str = "",
-    security_findings: int = 0,
-) -> None:
-    """Print the final execution summary banner."""
-    status_line = (
-        _c(_GREEN + _BOLD, "  ALL TESTS PASSED ✓")
-        if failed == 0
-        else _c(_RED + _BOLD, f"  {failed} FAILURE(S) DETECTED ✗")
-    )
+def print_completion(total_pages):
+    print("-" * _W)
+    print("  " + _c(_GREEN, "✓") + "  All hyperlinks tested  ·  " +
+          _bold(str(total_pages)) + " unique page(s) visited")
 
-    print()
-    print(_sep())
-    print(_c(_CYAN + _BOLD, f"  {'FINAL SUMMARY':^{_W - 4}}"))
-    print(_sep())
-    print(f"  {_c(_BLUE, 'Pages Tested    ')} : {_bold(str(pages))}")
-    print(f"  {_c(_BLUE, 'Total Elements  ')} : {_bold(str(total_elements))}")
-    print(f"  {_c(_GREEN, 'Passed Actions  ')} : {_bold(str(passed))}")
-    print(f"  {_c(_RED  if failed else _DIM, 'Failed Actions  ')} : {_bold(str(failed))}")
-    print(f"  {_c(_BLUE, 'Screenshots     ')} : {_bold(str(screenshots))}")
-    print(f"  {_c(_BLUE, 'HTML Report     ')} : {report_path}")
+
+def print_final_summary(pages, total_elements, passed, failed, screenshots, report_path, excel_path=None, inventory_path=None, security_findings=0, screenshot_dir=""):
+    print("")
+    status = _c(_GREEN + _BOLD, "  CRAWL COMPLETED SUCCESSFULLY ✓") if not failed \
+        else _c(_RED + _BOLD, "  " + str(failed) + " FAILURE(S) DETECTED ✗")
+    
+    print("=" * _W)
+    print(_c(_CYAN + _BOLD, "  FINAL SUMMARY".center(_W - 4)))
+    print("=" * _W)
+    print("  " + _c(_BLUE, "Pages Tested    ") + " : " + _bold(str(pages)))
+    print("  " + _c(_BLUE, "Total Elements  ") + " : " + _bold(str(total_elements)))
+    print("  " + _c(_GREEN, "Passed Actions  ") + " : " + _bold(str(passed)))
+    print("  " + _c(_RED  if failed else _DIM, "Failed Actions  ") + " : " + _bold(str(failed)))
+    print("  " + _c(_BLUE, "Screenshots     ") + " : " + _bold(str(screenshots)))
+    print("  " + _c(_BLUE, "HTML Report     ") + " : " + str(report_path))
     if excel_path:
-        print(f"  {_c(_GREEN, 'Excel Report    ')} : {excel_path}")
+        print("  " + _c(_GREEN, "Excel Report    ") + " : " + str(excel_path))
     if inventory_path:
-        print(f"  {_c(_GREEN, 'UI Inventory    ')} : {inventory_path}")
-    print(f"  {_c(_YELLOW, 'Security Issues ')} : {_bold(str(security_findings))}")
-    print(f"  {_c(_BLUE, 'Screenshots Dir ')} : {screenshot_dir}")
-    print(_sep())
-    print(status_line)
-    print(_sep())
-    print()
+        print("  " + _c(_GREEN, "UI Inventory    ") + " : " + str(inventory_path))
+    print("  " + _c(_YELLOW, "Security Issues ") + " : " + _bold(str(security_findings)))
+    print("  " + _c(_BLUE, "Screenshots Dir ") + " : " + str(screenshot_dir))
+    print("=" * _W)
+    print(status)
+    print("=" * _W)
+    print("")
 
 
-
-def print_login_required(url: str) -> None:
-    """Print the manual login prompt."""
-    print()
-    print(_sep())
-    print(_c(_YELLOW + _BOLD, f"  {'LOGIN REQUIRED':^{_W - 4}}"))
-    print(_sep())
-    print(f"  URL: {url}")
-    print("  Please log in manually in the browser window.")
-    print("  Testing will resume automatically after login.")
-    print(_sep())
-    print()
+def print_login_banner(url):
+    print("")
+    print(_c(_YELLOW + _BOLD, "  LOGIN REQUIRED".center(_W - 4)))
+    print("-" * _W)
+    print("  URL: " + str(url))
+    print("  Wait for manual login (timeout 120s)...")
 
 
-def print_login_success(url: str) -> None:
-    print(f"\n  {_c(_GREEN, '[✓]')} Login successful. Resuming on: {url}\n")
+def print_login_success(url):
+    print("")
+    print("  " + _c(_GREEN, "[✓]") + " Login successful. Resuming on: " + str(url))
+    print("")
 
 
-def print_login_timeout() -> None:
-    print(f"\n  {_c(_YELLOW, '[!]')} Login timeout. Proceeding without authentication.\n")
+def print_login_timeout():
+    print("")
+    print("  " + _c(_YELLOW, "[!]") + " Login timeout. Proceeding without authentication.")
+    print("")
 
 
-def print_nav_failed(url: str) -> None:
-    print(f"\n  {_c(_RED, '[✗]')} Failed to load: {url}\n")
+def print_load_error(url):
+    print("")
+    print("  " + _c(_RED, "[✗]") + " Failed to load: " + str(url))
+    print("")
