@@ -264,7 +264,7 @@ class ReportBuilder:
       </tr>
     </thead>
     <tbody>
-      {sec_rows if sec_rows else '<tr><td colspan=\"7\">No security findings detected.</td></tr>'}
+      {sec_rows if sec_rows else '<tr><td colspan="7">No security findings detected.</td></tr>'}
     </tbody>
   </table>
 
