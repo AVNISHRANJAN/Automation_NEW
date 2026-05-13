@@ -53,9 +53,19 @@ def print_discovery_summary(total):
     print("  " + _c(_BLUE, "Elements Found") + " : " + _bold(str(total)))
 
 
+def print_element_count(total):
+    """Compatibility wrapper for crawler.py's newer console API name."""
+    print_discovery_summary(total)
+
+
 def print_section(section):
     print("")
     print("  " + _c(_MAGENTA + _BOLD, section))
+
+
+def print_section_header(section):
+    """Compatibility wrapper for crawler.py's newer console API name."""
+    print_section(section)
 
 
 def print_interaction_row(elem_type, label, action, success, reason=None, is_last=False):
@@ -74,6 +84,11 @@ def print_interaction_row(elem_type, label, action, success, reason=None, is_las
     print("    " + icon + "  " + type_str + " " + str(label) + " " + _dim("→") + " " + act_str)
 
 
+def print_action(success, elem_type, label, action, reason=None):
+    """Compatibility wrapper for crawler.py's newer console API name."""
+    print_interaction_row(elem_type, label, action, success, reason=reason)
+
+
 def print_group_row(group_type, group_name, label, action, success, is_last=False):
     branch = "└──" if is_last else "├──"
     icon   = _c(_GREEN, "✓") if success else _c(_RED, "✗")
@@ -81,6 +96,11 @@ def print_group_row(group_type, group_name, label, action, success, is_last=Fals
     
     badge  = _c(color, "[" + str(group_type) + ":" + str(group_name) + "]")
     print("    " + icon + "  " + badge + " " + str(label) + " " + _dim("→") + " " + str(action))
+
+
+def print_form_group_result(success, group_type, group_name, label, action):
+    """Compatibility wrapper for crawler.py's newer console API name."""
+    print_group_row(group_type, group_name, label, action, success)
 
 
 def print_broken_link(url, reason=None):
@@ -92,9 +112,19 @@ def print_iframe_discovery(count):
     print("  " + _dim("→") + " " + str(count) + " element(s) found in iframes")
 
 
+def print_iframe_found(count):
+    """Compatibility wrapper for crawler.py's newer console API name."""
+    print_iframe_discovery(count)
+
+
 def print_queue_update(enqueued, queue_size):
     print("  " + _dim("→") + " " + str(enqueued) + " new URL(s) queued  " +
           _dim("(" + str(queue_size) + " total in queue)"))
+
+
+def print_links_enqueued(enqueued, queue_size):
+    """Compatibility wrapper for crawler.py's newer console API name."""
+    print_queue_update(enqueued, queue_size)
 
 
 def print_page_summary(passed, failed, skipped):
@@ -109,6 +139,19 @@ def print_error(label, msg, is_last=False):
     print("  " + branch + " " + _c(_RED, label) + " " + _dim("→") + " " + str(msg))
 
 
+def print_error_block(errors):
+    print("")
+    print("  " + _c(_RED + _BOLD, "ERRORS"))
+    for idx, err in enumerate(errors):
+        label = err.get("label", "error") if isinstance(err, dict) else "error"
+        action = err.get("action", "") if isinstance(err, dict) else ""
+        message = err.get("message", err) if isinstance(err, dict) else err
+        prefix = str(label)
+        if action:
+            prefix += " [" + str(action) + "]"
+        print_error(prefix, message, is_last=(idx == len(errors) - 1))
+
+
 def print_inventory_saved(path, pages, elements):
     print("")
     print("  " + _c(_GREEN, "[✓]") + " Element manifest saved")
@@ -116,10 +159,20 @@ def print_inventory_saved(path, pages, elements):
     print("      Covers " + str(pages) + " page(s), " + str(elements) + " element(s)")
 
 
+def print_manifest_saved(path, pages, elements):
+    """Compatibility wrapper for crawler.py's newer console API name."""
+    print_inventory_saved(path, pages, elements)
+
+
 def print_completion(total_pages):
     print("-" * _W)
     print("  " + _c(_GREEN, "✓") + "  All hyperlinks tested  ·  " +
           _bold(str(total_pages)) + " unique page(s) visited")
+
+
+def print_crawl_complete(total_pages):
+    """Compatibility wrapper for crawler.py's newer console API name."""
+    print_completion(total_pages)
 
 
 def print_final_summary(pages, total_elements, passed, failed, screenshots, report_path, excel_path=None, inventory_path=None, security_findings=0, screenshot_dir=""):
@@ -156,6 +209,11 @@ def print_login_banner(url):
     print("  Wait for manual login (timeout 120s)...")
 
 
+def print_login_required(url):
+    """Compatibility wrapper for login_detector.py's newer console API name."""
+    print_login_banner(url)
+
+
 def print_login_success(url):
     print("")
     print("  " + _c(_GREEN, "[✓]") + " Login successful. Resuming on: " + str(url))
@@ -172,3 +230,8 @@ def print_load_error(url):
     print("")
     print("  " + _c(_RED, "[✗]") + " Failed to load: " + str(url))
     print("")
+
+
+def print_nav_failed(url):
+    """Compatibility wrapper for main.py's newer console API name."""
+    print_load_error(url)

@@ -9,6 +9,7 @@ Responsibilities:
 """
 
 import logging
+# pyrefly: ignore [missing-import]
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
 
 import sys

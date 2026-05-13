@@ -869,6 +869,118 @@ class Crawler:
         return (passed, failed, skipped)
     # END: Sidebar Navigation Processing
 
+    async def _run_accordion_testing(
+        self,
+        url: str,
+        canonical_url: str,
+        accordion_elements: list,
+        processed: set,
+    ) -> tuple[int, int, int]:
+        """
+        Safely exercise accordion/collapsible triggers discovered on the page.
+
+        This keeps the existing crawler contract: click each newly discovered
+        accordion once, log the result, and recover to the canonical page if the
+        click unexpectedly navigates.
+        """
+        passed = failed = skipped = 0
+
+        for elem in accordion_elements:
+            elem_key = elem.fingerprint if elem.fingerprint else (
+                elem.selector, elem.label, elem.element_type.name
+            )
+            if elem_key in processed:
+                skipped += 1
+                continue
+
+            if config.GLOBAL_ELEMENT_DEDUP and self.state_tracker.is_element_tested(elem_key):
+                console.print_action(
+                    True, elem.element_type.name, elem.label,
+                    "skipped_already_tested",
+                )
+                processed.add(elem_key)
+                skipped += 1
+                continue
+
+            if self._normalize(self.page.url) != self._normalize(canonical_url):
+                ok = await self._safe_navigate(canonical_url)
+                if not ok:
+                    logger.warning("[Accordion] Could not return to page: %s", canonical_url)
+                    break
+
+            try:
+                result = await self.interactor.interact(elem)
+            except Exception as exc:
+                logger.error("[Accordion] Interaction failed safely on '%s': %s", elem.label, exc)
+                result = None
+
+            processed.add(elem_key)
+            self.state_tracker.mark_element_tested(elem_key)
+            self.state_tracker.mark_interaction_tested(elem_key, elem.element_type.name)
+
+            if result is None:
+                failed += 1
+                ss_path = await self.screenshot_manager.capture_error(
+                    page=self.page,
+                    url=url,
+                    action="accordion_interaction",
+                    error_type="accordion_interaction_error",
+                )
+                self.metadata_logger.log_error(
+                    url=url,
+                    action="accordion_interaction",
+                    error_type="accordion_interaction_error",
+                    error_message="Accordion interaction raised an exception",
+                    element_label=elem.label,
+                    element_type=elem.element_type.name,
+                    screenshot_path=ss_path,
+                )
+                console.print_action(False, elem.element_type.name, elem.label, "ERROR captured")
+            elif result.action_performed.startswith("skipped_stale"):
+                skipped += 1
+                self.metadata_logger.log_action(
+                    url=url,
+                    action=result.action_performed,
+                    element_label=result.element_label,
+                    element_type=result.element_type,
+                )
+                console.print_action(True, result.element_type, result.element_label, result.action_performed)
+            elif result.success:
+                passed += 1
+                self.metadata_logger.log_action(
+                    url=url,
+                    action=result.action_performed,
+                    element_label=result.element_label,
+                    element_type=result.element_type,
+                )
+                console.print_action(True, result.element_type, result.element_label, result.action_performed)
+            else:
+                failed += 1
+                ss_path = await self.screenshot_manager.capture_error(
+                    page=self.page,
+                    url=url,
+                    action=result.action_performed,
+                    error_type="accordion_interaction_error",
+                )
+                self.metadata_logger.log_error(
+                    url=url,
+                    action=result.action_performed,
+                    error_type="accordion_interaction_error",
+                    error_message=result.error_message,
+                    element_label=result.element_label,
+                    element_type=result.element_type,
+                    screenshot_path=ss_path,
+                )
+                console.print_action(False, result.element_type, result.element_label, "ERROR captured")
+
+            if self._normalize(self.page.url) != self._normalize(canonical_url):
+                ok = await self._safe_navigate(canonical_url)
+                if not ok:
+                    logger.warning("[Accordion] Could not recover to page: %s", canonical_url)
+                    break
+
+        return (passed, failed, skipped)
+
     async def _safe_navigate(self, url: str) -> bool:
         """Navigate with error handling. Returns True on success."""
         try:
@@ -904,12 +1016,11 @@ class Crawler:
         Normalize URL for deduplication.
         - Strips URL fragments (#anchor)
         - Strips trailing slashes
-        - Upgrades http:// → https://
+        - Preserves the original scheme
         """
         try:
             p = urlparse(url)
-            scheme     = "https" if p.scheme == "http" else p.scheme
-            normalized = p._replace(scheme=scheme, fragment="").geturl()
+            normalized = p._replace(fragment="").geturl()
             return normalized.rstrip("/")
         except Exception:
             return url
