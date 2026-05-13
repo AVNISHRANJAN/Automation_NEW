@@ -31,3 +31,8 @@ venv_clean/
 .venv/
 __pycache__/
 *.pyc
+venv_clean/
+.venv/
+venv/
+__pycache__/
+*.pyc
